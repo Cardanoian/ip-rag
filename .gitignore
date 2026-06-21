@@ -1,0 +1,21 @@
+# Vector store (rebuilt from docs/ via ingest.build_index)
+chroma_db/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# OMC tooling state (local only; plan lives in .omc/plans/)
+.omc/

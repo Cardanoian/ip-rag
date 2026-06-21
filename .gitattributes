@@ -1,0 +1,2 @@
+# Store the document corpus via Git LFS (D5 decision)
+docs/**/*.md filter=lfs diff=lfs merge=lfs -text
