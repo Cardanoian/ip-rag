@@ -1,59 +1,58 @@
-# TODO — post-MVP 작업 목록
+# TODO — Co-AI 연동 이후 작업
 
-MVP는 완성·검증 완료(테스트 82개 통과, code-review APPROVE). 아래는 **실제 색인 이후 품질·견고성·운영을 높이기 위한 후속 작업**이다.
-출처: code-reviewer 검증 findings + `README.md` 향후 작업 + 계획서(`.omc/plans/rag-invention-similarity-plan.md`) AC2b.
+## 완료
 
-범례 — 우선순위: 🔴 높음 / 🟡 중간 / 🟢 낮음 · **선행조건**: 실색인 = 실제 `build_index` 실행 후라야 의미 있음.
+- [x] /v1/search 버전 API와 하위 호환 /search 분리
+- [x] Rails ↔ RAG Bearer 서비스 토큰 인증
+- [x] 운영 환경 토큰 미설정 차단
+- [x] 동기 Gemini/Chroma 호출을 FastAPI 이벤트 루프 밖에서 실행
+- [x] /health와 /ready 분리
+- [x] 공급자 오류 상세를 API 응답에서 제거
+- [x] v1 응답에서 저자명·내부 파일 경로 제거
+- [x] year=-1을 null로 변환
+- [x] 비표준 --docs-dir의 절대 경로 노출 방지
+- [x] 임베딩 재시도를 rate-limit·5xx·연결·시간초과로 제한
+- [x] .env 자동 로딩과 운영 환경변수 문서화
+- [x] Dockerfile과 GitHub Actions 테스트 추가
 
----
+## 배포 전 필수
 
-## 0. 운영 선행 작업 (가장 먼저)
+- [ ] **원본 corpus의 재배포 권리와 개인정보 검토**
+  - 파일명·본문에 과거 참가자 이름이 존재할 수 있음
+  - 필요하면 원본 저장소를 비공개로 전환하고 가명화본만 운영 색인에 사용
+- [ ] Gemini API 키와 서비스 토큰을 실제 secret manager에 등록
+- [ ] --limit 50 소규모 색인 후 비용·속도·검색 결과 확인
+- [ ] 전체 색인을 빌드하고 INDEX_VERSION을 릴리스별로 고정
+- [ ] 20~30개 이상의 교사 라벨 평가 질의로 top-k 정확도 측정
+- [ ] Docker 이미지를 실제 배포 환경에서 build/run 검증
+- [ ] Rails timeout, 재시도, circuit breaker와 검색 이력 저장 구현
 
-- [ ] **`.env`에 `GEMINI_API_KEY` 설정** (`cp .env.example .env` 후 키 입력)
-- [ ] **실제 색인 실행**: `python -m ingest.build_index` — ⚠️ Gemini API 호출 = **비용 발생**. 먼저 `--limit 50`으로 소규모 검증 후 전체 실행 권장.
-- [ ] **색인 비용 산정**: 12,630문서 × 평균 청크 수 = 예상 API 호출 수/비용 추산 (Batch API 50% 가격 반영). 빌더가 호출 수를 로깅함.
+## 검색 품질
 
----
+- [ ] 교사 라벨 평가셋으로 max, length-normalized max, 평균 집계 비교
+- [ ] OVERFETCH_MULTIPLIER 부족 발생률 측정
+- [ ] 제목·부품명·정확한 용어를 위한 BM25/FTS 하이브리드 검색 검토
+- [ ] 유사도 임계값을 임의 지정하지 말고 precision/recall로 결정
+- [ ] 지도논문과 작품설명서 중복률 측정
+- [ ] 1536차원과 3072차원의 품질·저장공간·지연 비교
+- [ ] 100개 표본으로 한국어 문자/토큰 비율 실측
 
-## 1. 검색 품질 🔴 (실색인 + 평가셋 필요)
+## 특허 자료 — 별도 corpus
 
-- [ ] **(a) 집계 산식 튜닝 — AC2b 게이트** 🔴 *(선행조건: 실색인)*
-  - 현재: `작품점수 = max(청크 유사도) - LENGTH_NORM_C·log(청크수)`, `LENGTH_NORM_C=0.0`(순수 max). → 파일: [ingest/search.py](ingest/search.py), [config.py](config.py)
-  - 할 일: **사람 라벨 유사 작품 쌍 20~30개**(라벨러·유사성 정의·쌍 선정 프로토콜 문서화) 구축 → `max` vs `length-normalized max` vs `평균` A/B 비교 → 최고 방식과 `LENGTH_NORM_C` 값 확정.
-  - 이유: 순수 max는 청크 많은 긴 문서에 편향 가능 / 평균은 긴 문서 희석. 데이터로만 판정 가능.
-- [ ] **(b) over-fetch 충분성 점검** 🟡 *(선행조건: 실색인)*
-  - 현재: 청크를 `top_k×5` 조회 후 작품 단위 dedup, 부족 시 확보분만 반환(의도된 동작). → 파일: [ingest/search.py](ingest/search.py), `OVERFETCH_MULTIPLIER` in [config.py](config.py)
-  - 할 일: 실제 질의로 부족분 발생률 측정 → 잦으면 `OVERFETCH_MULTIPLIER` 상향 또는 N개 채울 때까지 반복 조회.
-- [ ] **(f) 토큰비 실측** 🟡 *(선행조건: 실색인 전 표본 측정)*
-  - 현재: 청킹 분기를 문자수(5,500자) 휴리스틱 + 1.2자/토큰 추정으로 처리. 트렁케이션 가드는 이미 코드화됨. → 파일: [ingest/build_index.py](ingest/build_index.py), [ingest/chunker.py](ingest/chunker.py)
-  - 할 일: Gemini 토크나이저로 100개 표본 tokens/char 실측 → 임계값 보정.
-- [ ] **지도논문 중복도 측정** 🟢 *(선행조건: 실색인)*
-  - 색인 후 작품설명서 ↔ 지도논문 실제 중복률 분석(필터의 근거였던 "준중복" 가정 검증). → 파일: [ingest/parse.py](ingest/parse.py)(doc_type), [ingest/search.py](ingest/search.py)(필터)
+- [ ] KIPRIS 또는 허용된 원천의 이용조건·호출 제한 확인
+- [ ] 공개번호, 출원번호, 등록번호, 제목, 초록, 청구항, IPC, 날짜 정규화
+- [ ] 공개번호 기준 중복 제거와 갱신 작업 설계
+- [ ] corpus_id=patents-* 별도 색인 생성
+- [ ] 수상작과 특허 결과를 Rails에서 출처별로 묶어 표시
+- [ ] 원문 링크와 조회일을 저장해 학생이 근거를 확인할 수 있게 함
+- [ ] “유사 특허 검색”과 “특허 가능성 판정”을 화면·문구에서 분리
 
----
+## 운영 견고성
 
-## 2. 코드 견고성 🟢 (지금 바로 가능, 색인 불필요)
-
-- [ ] **(d) `year=-1` 센티넬 → `null` 매핑** 🟢 *(~10분)*
-  - 파싱 실패 시 연도가 `-1`로 응답에 노출(Chroma가 `None` 미저장). 응답 단계에서 `-1`→`null`로 매핑. → 파일: [ingest/search.py](ingest/search.py), [api/schemas.py](api/schemas.py)
-- [ ] **(c) 비표준 `--docs-dir` 시 `source_path` 절대경로화** 🟢 *(~15분)*
-  - 프로젝트 밖 docs 경로 사용 시 `source_path`가 절대경로가 돼 ID 이식성/경로 노출 문제. 스캔 디렉터리 기준 상대경로로 도출하거나 제약 문서화. → 파일: [ingest/parse.py](ingest/parse.py)
-- [ ] **(e) 임베딩 백오프를 transient 오류로 한정** 🟢 *(~15분)*
-  - 현재 모든 예외에 5회 재시도 → 인증(401) 등 영구 오류도 ~31초 낭비. rate-limit/5xx/연결오류로만 재시도, 4xx는 즉시 실패. → 파일: [ingest/embedder.py](ingest/embedder.py)
-
----
-
-## 3. 운영 / 배포 🟡
-
-- [ ] **임베딩 차원 최적화**: 1536 vs 3072 비교(정확도 ↔ 저장·검색 성능). → `EMBED_DIM` in [config.py](config.py) *(차원 변경 시 재색인 필요)*
-- [ ] **Docker 패키징**: 프로덕션 배포용 컨테이너(`Dockerfile`, 환경변수 주입, chroma_db 볼륨).
-- [ ] **검색 운영 보강**(선택): 요청 타임아웃·백프레셔 임계값 튜닝(현재 semaphore 10), 로깅/모니터링.
-
----
-
-## 진행 순서 추천
-
-1. **0번 운영 선행** — 키 설정 + 실색인(소규모→전체) + 비용 산정.
-2. **2번 코드 견고성** (d)(c)(e) — 색인과 무관하게 즉시 적용 가능, 각 10~20분.
-3. **1번 검색 품질** (a)→(b)→(f) — 실색인 + 평가셋 구축 후 측정으로 확정.
-4. **3번 운영/배포** — 차원 최적화·Docker·모니터링.
+- [ ] 새 컬렉션을 완전히 만든 뒤 alias를 전환하는 무중단 색인 배포
+- [ ] 색인 빌드 실패 시 기존 컬렉션을 보존하는 원자적 교체
+- [ ] corpus에서 삭제된 문서의 고아 청크 정리
+- [ ] 요청 수, p95 지연, 401/429/5xx, Gemini 오류, 검색 결과 0건 모니터링
+- [ ] Gemini 장애 시 Rails에서 검색 지연 안내와 수동 검색 체크리스트 제공
+- [ ] 정기 백업·복원 시험과 이전 INDEX_VERSION 롤백 절차
+- [ ] 실제 부하 시험 후 SEARCH_CONCURRENCY와 서버 사양 조정
