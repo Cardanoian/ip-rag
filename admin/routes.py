@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
@@ -454,7 +455,9 @@ async def upload_documents(
         return _redirect(f"/admin/corpora/{corpus_id}")
 
     try:
-        result = documents.save_uploads(cfg, payload)
+        # zip 해제와 수천 개 파일 쓰기는 통째로 블로킹이다. 단일 워커라
+        # 이벤트 루프에서 그대로 돌리면 그동안 검색도 /health 도 멈춘다.
+        result = await asyncio.to_thread(documents.save_uploads, cfg, payload)
     except documents.UploadError as exc:
         flash(request, str(exc), "error")
         return _redirect(f"/admin/corpora/{corpus_id}")

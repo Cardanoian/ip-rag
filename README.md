@@ -512,6 +512,31 @@ bin/deploy restore <이름>          # 되돌린다. 되돌리기 전 자동으�
 Caddy 인증서는 별도 볼륨(`ip-rag-caddy-data`)에 있습니다. 이 볼륨을 지우면
 Let's Encrypt 재발급 한도에 걸릴 수 있으니 건드리지 마세요.
 
+### 업로드 한도
+
+어드민에서 한 번에 올릴 수 있는 용량은 `MAX_UPLOAD_BYTES`(이 배포는 250MB),
+zip을 풀었을 때 총량은 `MAX_UNZIPPED_BYTES`(1GB)로 제한됩니다.
+
+**한도를 바꿀 때는 두 곳을 함께 고쳐야 합니다.**
+
+1. `deploy/secrets.env`의 `MAX_UPLOAD_BYTES` → `bin/deploy secrets push`
+2. `deploy/Caddyfile`의 `request_body max_size` → `bin/deploy proxy reload`
+
+프록시 쪽이 더 작으면 요청이 앱에 닿기 전에 끊겨, 클라이언트는 이유를
+알 수 없는 413만 받습니다. 앱까지 도달해야 "한 번에 올릴 수 있는 용량은
+N MB 입니다"라는 안내가 나갑니다.
+
+업로드는 파일 전체를 메모리에 올려 처리하므로([admin/routes.py](admin/routes.py))
+한도를 크게 잡으면 그만큼 메모리가 필요합니다. 250MB zip 하나면 피크가
+500MB 안팎입니다. 압축 해제와 파일 쓰기는 별도 스레드에서 돌기 때문에
+업로드 중에도 검색과 헬스체크는 계속 응답합니다.
+
+문서가 아주 많으면 어드민 업로드보다 이쪽이 낫습니다.
+
+~~~bash
+bin/deploy exec python -m scripts.migrate_docs --corpus inventions --source /mnt/source
+~~~
+
 ### 인증서
 
 Caddy가 Let's Encrypt에서 인증서를 자동으로 받고, 수명의 2/3 지점 —

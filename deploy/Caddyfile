@@ -15,9 +15,11 @@
 {{DOMAIN}} {
 	encode zstd gzip
 
-	# 앱의 MAX_UPLOAD_BYTES(기본 20MB)보다 조금 크게 잡는다.
+	# 앱의 MAX_UPLOAD_BYTES 보다 조금 크게 잡는다. 여기서 먼저 끊으면
+	# 클라이언트는 이유를 모르는 413 만 받는다. 앱까지 도달해야
+	# "한 번에 올릴 수 있는 용량은 N MB 입니다" 라는 안내가 나간다.
 	request_body {
-		max_size 25MB
+		max_size 260MB
 	}
 
 	header {
