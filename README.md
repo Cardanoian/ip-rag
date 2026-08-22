@@ -358,33 +358,198 @@ corpus 공통 필드는 최상위에, corpus 종류별 필드는 `metadata`에 �
 
 공급자 예외의 상세 내용은 API 응답에 노출하지 않습니다.
 
-## Docker 배포
+## 서버 배포
+
+`bin/deploy` 하나로 빌드부터 롤백까지 처리합니다. Rails의 Kamal과 같은
+자리를 차지하는 스크립트입니다.
+
+```
+로컬에서 이미지 빌드 → Docker Hub 푸시 → 서버에서 pull
+  → 컨테이너 교체 → 헬스체크 → 실패하면 이전 버전으로 자동 롤백
+```
+
+앞단에는 Caddy 리버스 프록시 컨테이너가 서서 도메인 HTTPS 인증서를
+자동으로 발급받고, 관리자 화면을 IP로 제한합니다.
+
+### 준비물
+
+- SSH로 접속할 수 있는 리눅스 서버 1대 (Docker 설치, 80·443 포트 개방)
+- Docker Hub 저장소와 로컬 `docker login`
+- 서버를 가리키는 도메인 A 레코드
+
+### 최초 설정
+
+**1. 배포 설정을 채웁니다.**
+
+~~~bash
+cp deploy/config.env.example deploy/config.env
+~~~
+
+`SSH_HOST`, `IMAGE`, `DOMAIN`, `ACME_EMAIL`, `ADMIN_ALLOW_IPS`를 채웁니다.
+`ADMIN_ALLOW_IPS`에는 관리자 화면에 접속할 IP를 넣습니다. 자기 공인 IP는
+`curl -s https://api.ipify.org`로 확인합니다.
+
+`deploy/config.env`와 `deploy/secrets.env`는 둘 다 `.gitignore`에 있습니다.
+이 저장소가 공개되어 있어 서버 주소가 히스토리에 남지 않게 한 것입니다.
+`.example` 파일만 커밋됩니다.
+
+**2. 시크릿을 만듭니다.**
+
+~~~bash
+cp deploy/secrets.env.example deploy/secrets.env
+chmod 600 deploy/secrets.env
+python -c "import secrets; print(secrets.token_urlsafe(48))"   # 토큰 생성용
+~~~
+
+`GEMINI_API_KEY`, `RAG_API_TOKEN`, `SESSION_SECRET` 세 개는 반드시 채웁니다.
+값에 따옴표를 쓰지 마세요. `docker --env-file`은 따옴표를 값의 일부로 취급합니다.
+
+**3. 서버를 준비하고 첫 배포를 합니다.**
+
+~~~bash
+bin/deploy setup
+~~~
+
+디렉터리·네트워크·볼륨 생성, 시크릿 전송, Caddy 기동, 첫 배포까지 한 번에
+진행합니다. 무엇을 할지 먼저 보고 싶으면 `bin/deploy --dry-run setup`을 씁니다.
+
+**4. 최초 관리자 계정을 만듭니다.**
+
+~~~bash
+bin/deploy admin create-user <아이디>
+~~~
+
+첫 계정이 자동으로 최고관리자가 됩니다.
+
+**5. 문서를 올리고 색인합니다.** `https://<도메인>/admin`에 로그인해 문서를
+업로드하고 색인한 뒤 corpus를 공개합니다. 공개된 corpus가 하나도 없으면
+`/ready`는 503을 반환합니다 — 이것은 고장이 아니라 정상 상태입니다.
+
+대량 문서는 어드민 업로드 대신 컨테이너 안에서 넣습니다.
+
+~~~bash
+bin/deploy exec python -m scripts.migrate_docs --corpus inventions --source /mnt/source
+~~~
+
+### 일상 운영
+
+| 명령 | 하는 일 |
+|---|---|
+| `bin/deploy` | 빌드 → 푸시 → 교체 → 헬스체크 |
+| `bin/deploy status` | 컨테이너 상태, 현재 태그, `/health`·`/ready`, 인증서 만료일 |
+| `bin/deploy logs -f` | 앱 로그 따라가기 |
+| `bin/deploy rollback` | 직전 릴리스로 되돌리기 |
+| `bin/deploy releases` | 배포 이력과 남아 있는 이미지 |
+| `bin/deploy admin list-users` | 관리자 계정 목록 |
+| `bin/deploy console` | 컨테이너 안에서 bash 열기 |
+| `bin/deploy secrets push` | 시크릿을 바꾼 뒤 서버에 반영 |
+| `bin/deploy proxy reload` | Caddy 설정 변경 반영 (무중단) |
+| `bin/deploy backup` | `/data` 볼륨 백업 |
+| `bin/deploy help` | 전체 명령과 옵션 |
+
+배포는 기본적으로 커밋되지 않은 변경이 있으면 멈추고, `pytest`를 먼저
+돌립니다. 급할 때는 `--allow-dirty`, `--skip-tests`로 건너뜁니다.
+
+### 배포할 때 실제로 무슨 일이 일어나는가
+
+**5~20초 동안 앱 컨테이너가 내려갑니다.** 진짜 무중단 배포가 아닙니다.
+
+Chroma와 `app.db`가 모두 SQLite 파일이고 `/data` 볼륨 하나를 공유하기
+때문에, 신·구 컨테이너를 잠시라도 겹쳐 띄우면 두 프로세스가 같은 파일에
+쓰게 되어 데이터가 깨질 수 있습니다. 그래서 구 컨테이너를 완전히 세운 뒤
+새 컨테이너를 띄웁니다.
+
+대신 Caddy가 그동안 들어온 요청을 최대 `LB_TRY_DURATION`(기본 60초) 동안
+붙들고 재시도합니다. 사용자에게는 502가 아니라 "조금 느린 요청 하나"로
+보입니다. 이것이 체감 무중단을 만드는 유일한 장치이므로, **Rails 쪽 호출
+타임아웃을 30초 이상**으로 잡아야 의미가 있습니다. 그보다 짧으면 Caddy가
+붙들고 있는 동안 Rails가 먼저 끊습니다.
+
+**색인 잡이 도는 동안에는 배포하지 마세요.** 재시작하면 진행 중이던 잡이
+"서버가 재시작되어 중단되었습니다"로 실패 처리됩니다. 스크립트가 이를
+검사해 배포를 막습니다. 그래도 진행하려면 `--force`를 씁니다.
+
+**헬스체크는 `/health`로 판정합니다.** `/ready`는 아직 공개된 corpus가
+없을 때도 503을 반환하므로 배포 성공/실패의 기준이 될 수 없습니다.
+`/ready`의 문제 목록에 키 누락이나 색인 접근 실패처럼 진짜 고장이 섞여
+있으면 그때는 실패로 처리합니다. 색인까지 끝난 뒤 `/ready` 200을 강제하고
+싶으면 `--require-ready`를 붙입니다.
+
+헬스체크가 시간 안에 통과하지 못하면 새 컨테이너의 로그를 보여준 뒤
+이전 태그로 자동 롤백합니다.
+
+### 어드민 접근 제한
+
+`/admin`, `/ready`, `/docs`, `/openapi.json`은 `ADMIN_ALLOW_IPS`에 있는
+주소에서만 열립니다. 그 밖에서는 404를 돌려줘 존재 자체를 숨깁니다.
+앱은 클라이언트 IP를 전혀 보지 않으므로 이 프록시 규칙이 유일한 방어선입니다.
+
+`ADMIN_ALLOW_IPS`가 비어 있으면 이 경로들이 전면 차단됩니다. IP를 바꾸면
+`bin/deploy proxy reload`로 반영합니다. 접속 IP가 자주 바뀐다면 IP 목록
+대신 VPN이나 Tailscale을 앞에 두는 편이 낫습니다.
+
+### 백업과 복원
+
+백업 대상은 `/data` 볼륨 하나입니다. 벡터, 문서, 관리자 계정, 감사 로그가
+모두 여기 들어 있습니다.
+
+~~~bash
+bin/deploy backup                  # 앱을 잠시 세우고 일관된 스냅샷을 뜬다
+bin/deploy backup --hot            # 세우지 않고 뜬다 (일관성 보장 안 됨)
+bin/deploy backup list
+bin/deploy backup pull <이름>      # 로컬로 사본을 내려받는다
+bin/deploy restore <이름>          # 되돌린다. 되돌리기 전 자동으로 한 번 더 백업한다
+~~~
+
+기본 백업이 앱을 잠시 세우는 이유는 `app.db`와 `chroma.sqlite3`가 WAL
+모드라, 돌아가는 중에 tar로 뜨면 복원했을 때의 일관성을 보장할 수 없기
+때문입니다. 정기적으로 복원 리허설을 해 두는 것을 권합니다.
+
+Caddy 인증서는 별도 볼륨(`ip-rag-caddy-data`)에 있습니다. 이 볼륨을 지우면
+Let's Encrypt 재발급 한도에 걸릴 수 있으니 건드리지 마세요.
+
+### 인증서
+
+Caddy가 Let's Encrypt에서 인증서를 자동으로 받고, 수명의 2/3 지점 —
+90일 인증서면 만료 30일 전쯤 — 에 스스로 갱신합니다. 재시작할 필요도,
+사람이 손댈 일도 없습니다. 배포는 앱 컨테이너만 교체하므로 갱신과
+무관합니다.
+
+갱신이 계속되려면 네 가지가 유지돼야 합니다.
+
+- `ip-rag-caddy-data` 볼륨 — ACME 계정 키와 인증서가 여기 들어 있습니다.
+  지우면 처음부터 재발급이라 Let's Encrypt 발급 한도에 걸릴 수 있습니다
+- 프록시 컨테이너가 떠 있을 것 (`--restart unless-stopped`이라 재부팅에도 복귀)
+- 80·443 포트 개방 — 갱신 때도 챌린지를 받아야 합니다
+- DNS A 레코드가 계속 서버를 가리킬 것
+
+`bin/deploy status`가 현재 인증서의 만료일을 보여줍니다. 남은 기간이 3주
+밑으로 내려가면 경고합니다 — Caddy가 정상이라면 그 전에 갱신되므로,
+경고가 뜬다면 갱신이 실패하고 있다는 뜻입니다. `bin/deploy proxy logs`로
+원인을 확인합니다.
+
+### 장애 대응
+
+~~~bash
+bin/deploy status                  # 어디가 문제인지 먼저 본다
+bin/deploy logs -n 200             # 앱 로그
+bin/deploy proxy logs              # 인증서 발급 실패 등 프록시 문제
+bin/deploy rollback                # 직전 버전으로
+bin/deploy rollback <태그>         # 특정 버전으로 (releases 로 확인)
+bin/deploy unlock                  # 죽은 배포가 락을 남겼을 때
+~~~
+
+## 로컬 Docker 실행 (참고)
+
+배포 스크립트 없이 손으로 띄울 때의 절차입니다.
 
 ~~~bash
 docker build -t ip-rag .
 docker volume create ip-rag-data
-~~~
 
-초기 관리자 계정을 만듭니다.
-
-~~~bash
 docker run --rm -it -v ip-rag-data:/data ip-rag \
   python -m admin.cli create-user boss
-~~~
 
-문서는 서버를 띄운 뒤 어드민 화면에서 올립니다. 대량으로 넣어야 하면
-원본 디렉터리를 마운트해 스크립트를 씁니다.
-
-~~~bash
-docker run --rm \
-  -v "/경로/문서모음:/mnt/source:ro" \
-  -v ip-rag-data:/data \
-  ip-rag python -m scripts.migrate_docs --corpus inventions --source /mnt/source
-~~~
-
-API 실행:
-
-~~~bash
 docker run --rm -p 8000:8000 \
   -e APP_ENV=production \
   -e GEMINI_API_KEY=... \
@@ -400,8 +565,10 @@ docker run --rm -p 8000:8000 \
 그 이상의 규모가 필요해지면 관리형 벡터 DB나 별도 Chroma 서버 전환을
 검토합니다.
 
-어드민을 인터넷에 그대로 노출하지 말고 리버스 프록시에서 IP 제한이나 VPN을
-거치게 하는 것을 권합니다. 세션 쿠키는 production에서 `Secure` 플래그가 붙으므로
+리버스 프록시 뒤에 둘 때는 `FORWARDED_ALLOW_IPS`를 설정해야 합니다.
+uvicorn의 `--proxy-headers`는 기본적으로 `127.0.0.1`에서 온 요청의
+`X-Forwarded-*`만 신뢰하므로, 프록시가 다른 컨테이너에 있으면 헤더가
+무시됩니다. 세션 쿠키는 production에서 `Secure` 플래그가 붙으므로
 HTTPS가 필요합니다.
 
 ## 테스트

@@ -1,0 +1,1089 @@
+#!/usr/bin/env bash
+#
+# ip-rag 배포 도구. Rails 의 Kamal 과 같은 자리를 차지한다.
+#
+#   로컬에서 이미지를 빌드 → Docker Hub 로 푸시 → 서버에서 pull →
+#   컨테이너 교체 → 헬스체크 → 실패하면 이전 버전으로 자동 롤백
+#
+# 설정: deploy/config.env  (커밋됨)
+# 시크릿: deploy/secrets.env  (커밋되지 않음)
+#
+# 사용법은 `bin/deploy help` 참고.
+
+set -Eeuo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_DIR="$ROOT/deploy"
+# 다른 환경(스테이징 등)에 배포하려면 이 두 변수로 설정 파일을 갈아끼운다.
+#   DEPLOY_CONFIG=deploy/staging.env bin/deploy
+CONFIG_FILE="${DEPLOY_CONFIG:-$DEPLOY_DIR/config.env}"
+SECRETS_FILE="${DEPLOY_SECRETS:-$DEPLOY_DIR/secrets.env}"
+CADDY_TEMPLATE="$DEPLOY_DIR/Caddyfile"
+
+# ── 출력 ─────────────────────────────────────────────────────────────
+
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+	C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[34m'; C_D=$'\e[2m'; C_0=$'\e[0m'
+else
+	C_R=''; C_G=''; C_Y=''; C_B=''; C_D=''; C_0=''
+fi
+
+step() { printf '%s==>%s %s\n' "$C_B" "$C_0" "$*" >&2; }
+ok()   { printf '%s  ✓%s %s\n' "$C_G" "$C_0" "$*" >&2; }
+info() { printf '    %s\n' "$*" >&2; }
+warn() { printf '%s  !%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
+err()  { printf '%s  ✗%s %s\n' "$C_R" "$C_0" "$*" >&2; }
+
+# 종료 코드: 1 일반 실패 / 2 사용법 오류 / 3 사전 검사 실패(서버 무변경)
+#            4 헬스체크 실패(롤백 수행) / 5 다른 배포가 락을 쥐고 있음
+die() { local code=$1; shift; err "$*"; exit "$code"; }
+
+LOCK_HELD=0
+on_err() { err "실패한 명령 (${BASH_SOURCE[0]}:$1): ${BASH_COMMAND}"; }
+on_exit() { if (( LOCK_HELD )); then release_lock; fi; }
+trap 'on_err $LINENO' ERR
+trap on_exit EXIT
+
+# ── 옵션 파싱 ────────────────────────────────────────────────────────
+
+DRY_RUN=0
+SKIP_TESTS=0
+ALLOW_DIRTY=0
+REQUIRE_READY=0
+NO_ROLLBACK=0
+ASSUME_YES=0
+FORCE=0
+FOLLOW=0
+HOT_BACKUP=0
+TAIL_LINES=100
+OPT_TAG=""
+
+CMD=""
+ARGS=()
+
+usage() {
+	cat >&2 <<'USAGE'
+사용법: bin/deploy [옵션] <명령> [인자]
+
+명령
+  setup                  서버를 처음 준비하고 첫 배포까지 진행한다
+  deploy                 빌드 → 푸시 → 교체 → 헬스체크 (명령을 생략하면 이것)
+  redeploy               빌드 없이 현재 태그로 컨테이너만 다시 만든다
+                         (시크릿을 바꾼 뒤 반영할 때)
+  rollback [태그]        이전 릴리스(또는 지정한 태그)로 되돌린다
+  releases               배포 이력과 서버에 남아 있는 이미지를 보여준다
+  status                 컨테이너 상태, 현재 태그, /health·/ready,
+                         인증서 만료일을 보여준다
+  logs [app|proxy]       로그를 본다
+  exec <명령...>         앱 컨테이너 안에서 명령을 실행한다
+  console                앱 컨테이너 안에서 bash 를 연다
+  admin <인자...>        python -m admin.cli 를 실행한다
+                         예) bin/deploy admin create-user boss
+  secrets push           deploy/secrets.env 를 서버로 보내고 재기동한다
+  proxy install|reload|restart|logs
+                         Caddy 설정을 다시 적용하거나 프록시를 다룬다
+  backup [list|pull <이름>]
+                         /data 볼륨을 통째로 백업한다
+  restore <이름>         백업으로 되돌린다 (되돌릴 수 없다)
+  unlock                 죽은 배포가 남긴 락을 강제로 해제한다
+  help                   이 도움말
+
+옵션
+  --dry-run              실제로 실행하지 않고 무엇을 할지만 보여준다
+  --skip-tests           배포 전 pytest 를 건너뛴다
+  --allow-dirty          커밋되지 않은 변경이 있어도 배포한다
+  --require-ready        /ready 가 200 이 아니면 배포 실패로 처리한다
+  --no-rollback          헬스체크가 실패해도 자동 롤백하지 않는다
+  --force                진행 중인 색인 잡이 있어도 배포한다
+  --tag <태그>           빌드하지 않고 이미 있는 이미지 태그를 배포한다
+  --hot                  백업할 때 앱을 정지하지 않는다 (일관성 보장 안 됨)
+  -f, --follow           로그를 따라간다
+  -n, --lines <수>       로그 줄 수 (기본 100)
+  -y, --yes              확인 프롬프트를 모두 승인한다
+USAGE
+}
+
+while (( $# )); do
+	case "$1" in
+		-h|--help|help)  usage; exit 0 ;;
+		--dry-run)       DRY_RUN=1 ;;
+		--skip-tests)    SKIP_TESTS=1 ;;
+		--allow-dirty)   ALLOW_DIRTY=1 ;;
+		--require-ready) REQUIRE_READY=1 ;;
+		--no-rollback)   NO_ROLLBACK=1 ;;
+		--force)         FORCE=1 ;;
+		--hot)           HOT_BACKUP=1 ;;
+		-y|--yes)        ASSUME_YES=1 ;;
+		-f|--follow)     FOLLOW=1 ;;
+		-n|--lines)      shift || die 2 "-n 에 줄 수가 필요합니다"; TAIL_LINES="$1" ;;
+		--tag)           shift || die 2 "--tag 에 값이 필요합니다"; OPT_TAG="$1" ;;
+		--)              shift; ARGS+=("$@"); break ;;
+		-*)              die 2 "알 수 없는 옵션: $1 (bin/deploy help)" ;;
+		*)
+			if [[ -z "$CMD" ]]; then
+				CMD="$1"
+				# 이 명령들은 뒤에 오는 인자를 그대로 컨테이너에 넘긴다
+				case "$CMD" in
+					exec|console|admin) shift; ARGS+=("$@"); break ;;
+				esac
+			else
+				ARGS+=("$1")
+			fi
+			;;
+	esac
+	shift
+done
+CMD="${CMD:-deploy}"
+
+# ── 설정 ─────────────────────────────────────────────────────────────
+
+load_config() {
+	if [[ ! -f "$CONFIG_FILE" ]]; then
+		err "설정 파일이 없습니다: $CONFIG_FILE"
+		info "cp deploy/config.env.example deploy/config.env"
+		die 3 "복사한 뒤 값을 채우고 다시 실행하세요."
+	fi
+	set -a
+	# shellcheck disable=SC1090
+	source "$CONFIG_FILE"
+	set +a
+
+	: "${APP_NAME:=ip-rag}"
+	: "${SSH_PORT:=22}"
+	: "${SSH_KEY:=}"
+	: "${PLATFORM:=linux/amd64}"
+	: "${REMOTE_DIR:=/opt/$APP_NAME}"
+	: "${DATA_VOLUME:=$APP_NAME-data}"
+	: "${NETWORK:=$APP_NAME}"
+	: "${ADMIN_ALLOW_IPS:=}"
+	: "${HOST_BIND:=127.0.0.1}"
+	: "${APP_PORT:=8000}"
+	: "${PROXY_IMAGE:=caddy:2-alpine}"
+	: "${LB_TRY_DURATION:=60s}"
+	: "${HEALTHCHECK_TIMEOUT:=120}"
+	: "${STOP_TIMEOUT:=30}"
+	: "${KEEP_RELEASES:=3}"
+	: "${ACME_EMAIL:=}"
+	: "${DOMAIN:=}"
+	: "${SSH_HOST:=}"
+	: "${IMAGE:=}"
+
+	WEB="$APP_NAME-web"
+	PROXY="$APP_NAME-proxy"
+	CADDY_DATA_VOLUME="$APP_NAME-caddy-data"
+	CADDY_CONFIG_VOLUME="$APP_NAME-caddy-config"
+
+	SSH_BASE=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new
+	          -o ControlMaster=auto -o ControlPath="${TMPDIR:-/tmp}/.ip-rag-ssh-%C"
+	          -o ControlPersist=60 -p "$SSH_PORT")
+	if [[ -n "$SSH_KEY" ]]; then
+		SSH_BASE+=(-i "$SSH_KEY")
+	fi
+	SSH_OPTS=(-o BatchMode=yes "${SSH_BASE[@]}")
+}
+
+require_config() {
+	local missing=()
+	[[ -n "$SSH_HOST" && "$SSH_HOST" != *example.com* ]] || missing+=("SSH_HOST")
+	[[ -n "$IMAGE" && "$IMAGE" != *USERNAME* ]]         || missing+=("IMAGE")
+	[[ -n "$DOMAIN" && "$DOMAIN" != *example.com* ]]    || missing+=("DOMAIN")
+	[[ -n "$ACME_EMAIL" && "$ACME_EMAIL" != *example.com* ]] || missing+=("ACME_EMAIL")
+	if (( ${#missing[@]} )); then
+		err "deploy/config.env 에서 아직 채우지 않은 값이 있습니다: ${missing[*]}"
+		die 3 "파일을 열어 주석을 읽고 값을 채운 뒤 다시 실행하세요."
+	fi
+}
+
+# secrets.env 는 절대 source 하지 않는다.
+# 값에 $(...) 나 백틱이 들어 있으면 그대로 실행되기 때문이다.
+secret_value() {
+	grep -m1 -E "^$1=" "$SECRETS_FILE" 2>/dev/null | cut -d= -f2- || true
+}
+
+require_secrets() {
+	if [[ ! -f "$SECRETS_FILE" ]]; then
+		err "deploy/secrets.env 가 없습니다."
+		info "cp deploy/secrets.env.example deploy/secrets.env"
+		info "chmod 600 deploy/secrets.env"
+		die 3 "파일을 만들고 값을 채운 뒤 다시 실행하세요."
+	fi
+
+	local perm
+	perm=$(stat -c '%a' "$SECRETS_FILE" 2>/dev/null || stat -f '%Lp' "$SECRETS_FILE" 2>/dev/null || echo "")
+	if [[ -n "$perm" && "$perm" != "600" ]]; then
+		warn "deploy/secrets.env 권한이 $perm 입니다: chmod 600 deploy/secrets.env"
+	fi
+
+	local key value missing=()
+	for key in GEMINI_API_KEY RAG_API_TOKEN SESSION_SECRET; do
+		value=$(secret_value "$key")
+		if [[ -z "$value" ]]; then
+			missing+=("$key")
+		elif [[ "$value" == *your-* || "$value" == *replace-with-* || "$value" == *CHANGEME* ]]; then
+			missing+=("$key(예시값 그대로)")
+		elif [[ "$value" == \"* || "$value" == \'* ]]; then
+			err "$key 값이 따옴표로 감싸여 있습니다."
+			die 3 "docker --env-file 은 따옴표를 값의 일부로 취급합니다. 따옴표를 지우세요."
+		fi
+	done
+	if (( ${#missing[@]} )); then
+		die 3 "deploy/secrets.env 에 채워지지 않은 값: ${missing[*]}"
+	fi
+
+	value=$(secret_value SESSION_SECRET)
+	if (( ${#value} < 32 )); then
+		warn "SESSION_SECRET 이 ${#value}자입니다. 32자 이상을 권합니다."
+	fi
+}
+
+# ── 실행 헬퍼 ────────────────────────────────────────────────────────
+
+run() {
+	if (( DRY_RUN )); then
+		printf '%s    [dry-run] %s%s\n' "$C_D" "$*" "$C_0" >&2
+		return 0
+	fi
+	"$@"
+}
+
+# 서버 상태를 바꾸는 호출. --dry-run 이면 실행하지 않는다.
+ssh_do() {
+	if (( DRY_RUN )); then
+		printf '%s    [dry-run] ssh %s %s%s\n' "$C_D" "$SSH_HOST" "$*" "$C_0" >&2
+		return 0
+	fi
+	ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
+}
+
+# 읽기만 하는 호출. --dry-run 에서도 실제 서버 상태를 보여주기 위해 실행한다.
+ssh_read() {
+	ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
+}
+
+ssh_pipe() {
+	if (( DRY_RUN )); then
+		printf '%s    [dry-run] ssh %s %s <stdin%s\n' "$C_D" "$SSH_HOST" "$*" "$C_0" >&2
+		cat >/dev/null
+		return 0
+	fi
+	ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
+}
+
+# 대화형 명령용. BatchMode 를 빼고 tty 를 붙인다.
+ssh_tty() {
+	ssh -t "${SSH_BASE[@]}" "$SSH_HOST" "$@"
+}
+
+confirm() {
+	if (( ASSUME_YES )); then return 0; fi
+	local reply
+	printf '%s  ?%s %s [y/N] ' "$C_Y" "$C_0" "$1" >&2
+	read -r reply </dev/tty || return 1
+	[[ "$reply" == [yY]* ]]
+}
+
+python_cmd() {
+	if [[ -x "$ROOT/.venv/bin/python" ]]; then
+		printf '%s' "$ROOT/.venv/bin/python"
+	elif command -v python >/dev/null 2>&1; then
+		printf 'python'
+	elif command -v python3 >/dev/null 2>&1; then
+		printf 'python3'
+	else
+		die 3 "python 을 찾을 수 없습니다"
+	fi
+}
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+actor()   { printf '%s@%s' "$(id -un)" "$(hostname -s 2>/dev/null || echo unknown)"; }
+
+# ── 배포 락 ──────────────────────────────────────────────────────────
+# mkdir 은 원자적이라 별도 도구 없이 동시 배포를 막을 수 있다.
+
+acquire_lock() {
+	if (( DRY_RUN )); then return 0; fi
+	if ! ssh_read "mkdir '$REMOTE_DIR/deploy.lock' 2>/dev/null"; then
+		local owner
+		owner=$(ssh_read "cat '$REMOTE_DIR/deploy.lock/owner' 2>/dev/null" || true)
+		err "다른 배포가 진행 중입니다: ${owner:-알 수 없음}"
+		die 5 "죽은 배포가 남긴 락이라면 bin/deploy unlock 으로 해제하세요."
+	fi
+	LOCK_HELD=1
+	ssh_read "printf '%s\n' '$(actor) $(now_utc)' > '$REMOTE_DIR/deploy.lock/owner'" || true
+}
+
+release_lock() {
+	LOCK_HELD=0
+	ssh_read "rm -f '$REMOTE_DIR/deploy.lock/owner' 2>/dev/null; rmdir '$REMOTE_DIR/deploy.lock' 2>/dev/null || true" || true
+}
+
+# ── 컨테이너 조회 ────────────────────────────────────────────────────
+
+# --dry-run 에서는 서버에 접속하지 않는다. 아직 서버가 없어도
+# 어떤 명령이 실행될지 끝까지 볼 수 있어야 하기 때문이다.
+current_tag() {
+	if (( DRY_RUN )); then return 0; fi
+	ssh_read "cat '$REMOTE_DIR/current' 2>/dev/null" 2>/dev/null || true
+}
+
+previous_tag() {
+	if (( DRY_RUN )); then return 0; fi
+	ssh_read "cat '$REMOTE_DIR/previous' 2>/dev/null" 2>/dev/null || true
+}
+
+running_image() {
+	if (( DRY_RUN )); then printf '%s' "$IMAGE:latest"; return 0; fi
+	ssh_read "docker inspect -f '{{.Config.Image}}' '$WEB' 2>/dev/null" 2>/dev/null || true
+}
+
+container_running() {
+	if (( DRY_RUN )); then return 0; fi
+	local state
+	state=$(ssh_read "docker inspect -f '{{.State.Running}}' '$WEB' 2>/dev/null" 2>/dev/null || echo false)
+	[[ "$state" == "true" ]]
+}
+
+# 컨테이너 안에서 엔드포인트를 호출한다.
+# python:3.11-slim 에는 curl 도 wget 도 없으므로 파이썬 표준 라이브러리를 쓴다.
+# 출력 1행은 상태 코드(연결 실패면 0), 2행부터는 본문이다.
+probe() {
+	local path="$1" timeout="${2:-10}"
+	ssh_read "docker exec -i '$WEB' python" <<PY 2>/dev/null || true
+import urllib.request, urllib.error
+try:
+    r = urllib.request.urlopen("http://127.0.0.1:8000$path", timeout=$timeout)
+    status, body = r.status, r.read()
+except urllib.error.HTTPError as e:
+    status, body = e.code, e.read()
+except Exception as e:
+    print(0); print(e); raise SystemExit(0)
+print(status)
+print(body.decode("utf-8", "replace"))
+PY
+}
+
+wait_for_health() {
+	local deadline=$(( SECONDS + HEALTHCHECK_TIMEOUT )) status
+	step "헬스체크 (/health, 최대 ${HEALTHCHECK_TIMEOUT}초)"
+	while (( SECONDS < deadline )); do
+		status=$(probe /health 3 | head -1)
+		if [[ "$status" == "200" ]]; then
+			ok "/health 200"
+			return 0
+		fi
+		if ! container_running; then
+			err "컨테이너가 기동 도중 종료되었습니다"
+			return 1
+		fi
+		sleep 2
+	done
+	err "/health 가 ${HEALTHCHECK_TIMEOUT}초 안에 200 을 돌려주지 않았습니다"
+	return 1
+}
+
+# /ready 는 이미지를 되돌려서 고칠 수 있는 문제일 때만 롤백 사유다.
+# 시드 corpus 는 draft 로 시작하므로(corpora/seed.py) 첫 배포의
+# "no published corpus" 503 은 고장이 아니라 정상 상태다.
+READY_SOFT_RE='no published corpus|search index is empty'
+
+check_ready() {
+	local out status body problems blocking=0 p
+	out=$(probe /ready 15)
+	status=$(printf '%s\n' "$out" | head -1)
+	body=$(printf '%s\n' "$out" | tail -n +2)
+
+	if [[ "$status" == "200" ]]; then
+		ok "/ready 200"
+		return 0
+	fi
+	if [[ -z "$status" || "$status" == "0" ]]; then
+		warn "/ready 를 조회하지 못했습니다"
+		return 1
+	fi
+
+	problems=$(printf '%s' "$body" | grep -o '"problems":\[[^]]*\]' | head -1 \
+		| sed 's/.*\[//; s/\].*//; s/"//g')
+
+	if [[ -z "$problems" ]]; then
+		err "/ready $status"
+		printf '%s\n' "$body" | head -5 >&2
+		return 1
+	fi
+
+	# 마지막 항목 뒤에는 개행이 없으므로 `|| [[ -n "$p" ]]` 가 있어야
+	# 마지막 problem 을 빠뜨리지 않는다.
+	while IFS= read -r p || [[ -n "$p" ]]; do
+		if [[ -z "$p" ]]; then continue; fi
+		if [[ "$p" =~ $READY_SOFT_RE ]]; then
+			warn "/ready 경고: $p"
+		else
+			err "/ready 문제: $p"
+			blocking=1
+		fi
+	done < <(printf '%s' "$problems" | tr ',' '\n' | sed 's/^ *//; s/ *$//')
+
+	if (( blocking )); then
+		return 1
+	fi
+	warn "/ready 가 503 이지만 아직 공개된 corpus 가 없어서입니다. 배포 자체는 성공입니다."
+	info "관리자 화면에서 문서를 올리고 색인한 뒤 corpus 를 공개하면 해제됩니다."
+	return 0
+}
+
+# ── 컨테이너 수명주기 ────────────────────────────────────────────────
+
+stop_app() {
+	ssh_do "docker stop -t $STOP_TIMEOUT '$WEB' >/dev/null 2>&1 || true"
+}
+
+start_app() {
+	local image_ref="$1"
+	# --restart unless-stopped 로 두므로, 실패한 컨테이너는 반드시 rm -f 로 지운다.
+	# 그냥 두면 도커가 계속 되살려 롤백된 컨테이너와 포트를 다툰다.
+	ssh_do "docker rm -f '$WEB' >/dev/null 2>&1 || true"
+	ssh_do "docker run -d --name '$WEB' \
+		--restart unless-stopped \
+		--network '$NETWORK' \
+		--env-file '$REMOTE_DIR/env' \
+		-v '$DATA_VOLUME':/data \
+		-p '$HOST_BIND':'$APP_PORT':8000 \
+		--stop-timeout $STOP_TIMEOUT \
+		--log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
+		--label app='$APP_NAME' \
+		'$image_ref' >/dev/null"
+}
+
+# 구 컨테이너를 세우고 새 컨테이너를 띄운다.
+# 두 컨테이너를 겹쳐 띄우지 않는 것이 핵심이다. Chroma 와 app.db 가 모두
+# SQLite 파일이라 같은 /data 볼륨에 두 프로세스가 붙으면 깨질 수 있다.
+# 그 사이 들어오는 요청은 Caddy 의 lb_try_duration 이 붙들어 준다.
+swap_to() {
+	local tag="$1"
+	step "컨테이너를 교체합니다 → $tag"
+	stop_app
+	start_app "$IMAGE:$tag"
+}
+
+record_release() {
+	local tag="$1"
+	ssh_do "printf '%s\n' '$tag' > '$REMOTE_DIR/current'"
+	ssh_do "printf '%s %s %s\n' '$tag' '$(now_utc)' '$(actor)' >> '$REMOTE_DIR/releases'"
+}
+
+prune_images() {
+	if (( DRY_RUN )); then return 0; fi
+	local keep all tag
+	keep=$(ssh_read "tail -n $KEEP_RELEASES '$REMOTE_DIR/releases' 2>/dev/null | awk '{print \$1}'" || true)
+	all=$(ssh_read "docker images --filter=reference='$IMAGE' --format '{{.Tag}}'" || true)
+	if [[ -z "$all" ]]; then return 0; fi
+	while IFS= read -r tag; do
+		if [[ -z "$tag" || "$tag" == "latest" || "$tag" == "<none>" ]]; then continue; fi
+		if grep -qxF "$tag" <<<"$keep"; then continue; fi
+		if ssh_read "docker rmi '$IMAGE:$tag' >/dev/null 2>&1"; then
+			info "구버전 이미지 삭제: $tag"
+		fi
+	done <<<"$all"
+}
+
+# 재시작은 진행 중인 색인 잡을 죽인다.
+# api/main.py 의 lifespan 이 reset_interrupted() 를 호출해
+# queued/running 잡을 "서버가 재시작되어 중단되었습니다"로 실패 처리한다.
+assert_no_active_job() {
+	if (( FORCE )) || (( DRY_RUN )); then return 0; fi
+	if ! container_running; then return 0; fi
+	local n
+	n=$(ssh_read "docker exec -i '$WEB' python" <<'PY' 2>/dev/null
+import os, sqlite3
+db = os.path.join(os.environ.get("DATA_DIR", "/data"), "app.db")
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    print(con.execute(
+        "select count(*) from jobs where status in ('queued','running')"
+    ).fetchone()[0])
+except Exception:
+    print(0)
+PY
+	) || n=0
+	n="${n//[!0-9]/}"
+	if [[ -n "$n" && "$n" != "0" ]]; then
+		err "진행 중인 색인 잡이 ${n}건 있습니다."
+		info "지금 배포하면 이 잡들이 중단 처리됩니다."
+		die 3 "잡이 끝난 뒤 배포하거나, 그래도 진행하려면 --force 를 쓰세요."
+	fi
+}
+
+# ── Caddy ────────────────────────────────────────────────────────────
+
+# 관리자 화면과 정보가 노출되는 경로들. 앱은 클라이언트 IP 를 전혀 보지 않으므로
+# 프록시의 이 규칙이 유일한 방어선이다.
+PRIVATE_PATHS='/admin /admin/* /ready /docs /docs/* /redoc /openapi.json'
+
+render_caddyfile() {
+	local guard line
+	if [[ -n "${ADMIN_ALLOW_IPS// /}" ]]; then
+		guard=$(printf '\t\t@private_denied {\n\t\t\tpath %s\n\t\t\tnot remote_ip %s\n\t\t}\n\t\trespond @private_denied 404' \
+			"$PRIVATE_PATHS" "$ADMIN_ALLOW_IPS")
+	else
+		guard=$(printf '\t\t@private path %s\n\t\trespond @private 404' "$PRIVATE_PATHS")
+	fi
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		case "$line" in
+			*'{{PRIVATE_GUARD}}'*)
+				printf '%s\n' "$guard"
+				;;
+			*)
+				line=${line//'{{DOMAIN}}'/$DOMAIN}
+				line=${line//'{{ACME_EMAIL}}'/$ACME_EMAIL}
+				line=${line//'{{APP_NAME}}'/$APP_NAME}
+				line=${line//'{{LB_TRY_DURATION}}'/$LB_TRY_DURATION}
+				printf '%s\n' "$line"
+				;;
+		esac
+	done < "$CADDY_TEMPLATE"
+}
+
+proxy_apply() {
+	local mode="${1:-reload}"
+
+	if [[ -z "${ADMIN_ALLOW_IPS// /}" ]]; then
+		warn "ADMIN_ALLOW_IPS 가 비어 있어 /admin, /ready, /docs 를 전면 차단합니다."
+		info "관리자 화면을 쓰려면 config.env 에 접속할 IP 를 넣고 bin/deploy proxy reload 를 실행하세요."
+		info "내 공인 IP 확인: curl -s https://api.ipify.org"
+	fi
+
+	step "Caddy 설정을 전송합니다"
+	if (( DRY_RUN )); then
+		info "[dry-run] 렌더링 결과:"
+		render_caddyfile | sed 's/^/      /' >&2
+	else
+		render_caddyfile | ssh_pipe "umask 022; mkdir -p '$REMOTE_DIR/proxy'; cat > '$REMOTE_DIR/proxy/Caddyfile.new'"
+		# 잘못된 설정을 살아 있는 프록시에 밀어넣지 않는다
+		if ! ssh_read "docker run --rm -v '$REMOTE_DIR/proxy':/tmp/caddy:ro '$PROXY_IMAGE' caddy validate --config /tmp/caddy/Caddyfile.new --adapter caddyfile" >/dev/null 2>&1; then
+			ssh_do "rm -f '$REMOTE_DIR/proxy/Caddyfile.new'"
+			die 3 "Caddyfile 검증에 실패했습니다. deploy/Caddyfile 을 확인하세요."
+		fi
+		# 디렉터리 안에서 교체하므로 컨테이너가 새 내용을 본다
+		ssh_do "mv '$REMOTE_DIR/proxy/Caddyfile.new' '$REMOTE_DIR/proxy/Caddyfile'"
+	fi
+
+	if [[ "$mode" == "install" ]]; then
+		ssh_do "docker rm -f '$PROXY' >/dev/null 2>&1 || true"
+		ssh_do "docker run -d --name '$PROXY' \
+			--restart unless-stopped \
+			--network '$NETWORK' \
+			-p 80:80 -p 443:443 -p 443:443/udp \
+			-v '$REMOTE_DIR/proxy':/etc/caddy:ro \
+			-v '$CADDY_DATA_VOLUME':/data \
+			-v '$CADDY_CONFIG_VOLUME':/config \
+			'$PROXY_IMAGE' >/dev/null"
+		ok "프록시를 기동했습니다"
+	else
+		ssh_do "docker exec '$PROXY' caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile"
+		ok "프록시 설정을 다시 적용했습니다 (무중단)"
+	fi
+}
+
+# ── 명령 구현 ────────────────────────────────────────────────────────
+
+preflight_local() {
+	local c
+	for c in git docker ssh; do
+		command -v "$c" >/dev/null 2>&1 || die 3 "$c 명령을 찾을 수 없습니다"
+	done
+
+	if (( ! ALLOW_DIRTY )) && [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+		die 3 "커밋되지 않은 변경이 있습니다. 커밋하거나 --allow-dirty 를 쓰세요."
+	fi
+
+	if (( ! SKIP_TESTS )); then
+		step "테스트를 실행합니다"
+		local py; py=$(python_cmd)
+		run "$py" -m pytest -q || die 3 "테스트가 실패했습니다. --skip-tests 로 건너뛸 수 있습니다."
+	fi
+
+	if (( DRY_RUN )); then
+		info "[dry-run] SSH 연결 확인을 건너뜁니다"
+		return 0
+	fi
+	step "SSH 연결을 확인합니다: $SSH_HOST"
+	ssh_read true || die 3 "SSH 접속에 실패했습니다: $SSH_HOST (포트 $SSH_PORT)"
+	ssh_read "command -v docker >/dev/null" || die 3 "서버에 docker 가 없습니다."
+}
+
+build_and_push() {
+	local tag="$1"
+	step "이미지를 빌드합니다: $IMAGE:$tag ($PLATFORM)"
+	run docker build --platform "$PLATFORM" \
+		-t "$IMAGE:$tag" -t "$IMAGE:latest" \
+		--label "org.opencontainers.image.revision=$(git -C "$ROOT" rev-parse HEAD)" \
+		--label "org.opencontainers.image.created=$(now_utc)" \
+		"$ROOT"
+
+	step "Docker Hub 로 푸시합니다"
+	if ! run docker push "$IMAGE:$tag"; then
+		err "푸시에 실패했습니다."
+		die 1 "docker login 을 했는지, IMAGE 이름이 맞는지 확인하세요."
+	fi
+	if ! run docker push "$IMAGE:latest"; then
+		warn "latest 태그 푸시에 실패했지만 배포는 계속합니다"
+	fi
+}
+
+rollback_after_failure() {
+	local prev="$1"
+	err "배포에 실패했습니다. 새 컨테이너 로그 마지막 100줄:"
+	ssh_read "docker logs --tail 100 '$WEB' 2>&1" >&2 || true
+
+	if [[ -z "$prev" ]]; then
+		err "돌아갈 이전 릴리스가 없습니다 (최초 배포)."
+		ssh_do "docker rm -f '$WEB' >/dev/null 2>&1 || true"
+		die 4 "컨테이너를 정리했습니다. 원인을 고친 뒤 다시 배포하세요."
+	fi
+	if (( NO_ROLLBACK )); then
+		die 4 "--no-rollback 이 지정되어 롤백하지 않았습니다. 컨테이너는 그대로 두었습니다."
+	fi
+
+	warn "이전 버전으로 되돌립니다: $prev"
+	swap_to "$prev"
+	if wait_for_health; then
+		ok "롤백에 성공했습니다. 현재 $prev 로 서비스 중입니다."
+	else
+		err "롤백한 컨테이너도 헬스체크를 통과하지 못했습니다. 즉시 확인이 필요합니다."
+	fi
+	die 4 "배포 실패"
+}
+
+cmd_deploy() {
+	require_config
+	require_secrets
+	preflight_local
+
+	local tag
+	tag="${OPT_TAG:-$(git -C "$ROOT" rev-parse --short=12 HEAD)}"
+	if [[ -z "$OPT_TAG" ]] && [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+		# 더러운 트리는 SHA 만으로 추적할 수 없으므로 태그를 구분해 둔다
+		tag="$tag-dirty$(date +%H%M%S)"
+	fi
+
+	if [[ -n "$OPT_TAG" ]]; then
+		step "빌드를 건너뛰고 기존 이미지를 배포합니다: $IMAGE:$tag"
+	else
+		build_and_push "$tag"
+	fi
+
+	acquire_lock
+	assert_no_active_job
+
+	step "서버에서 이미지를 내려받습니다"
+	ssh_do "docker pull '$IMAGE:$tag' >/dev/null" || die 1 "서버에서 이미지를 내려받지 못했습니다."
+
+	local prev
+	prev=$(current_tag)
+	if [[ -n "$prev" ]]; then
+		ssh_do "printf '%s\n' '$prev' > '$REMOTE_DIR/previous'"
+	fi
+
+	swap_to "$tag"
+
+	if (( DRY_RUN )); then
+		ok "[dry-run] 이후 헬스체크와 릴리스 기록이 이어집니다"
+		return 0
+	fi
+
+	if ! wait_for_health; then
+		rollback_after_failure "$prev"
+	fi
+
+	if ! check_ready && (( REQUIRE_READY )); then
+		err "--require-ready 가 켜져 있는데 /ready 가 통과하지 못했습니다"
+		rollback_after_failure "$prev"
+	fi
+
+	record_release "$tag"
+	release_lock
+	prune_images
+	verify_public
+	ok "배포 완료: ${prev:-없음} → $tag"
+}
+
+verify_public() {
+	if (( DRY_RUN )); then return 0; fi
+	command -v curl >/dev/null 2>&1 || return 0
+	step "공개 주소를 확인합니다"
+	if curl -fsS -m 15 "https://$DOMAIN/health" >/dev/null 2>&1; then
+		ok "https://$DOMAIN/health 200"
+	else
+		warn "https://$DOMAIN/health 확인에 실패했습니다."
+		info "DNS 전파나 인증서 발급이 아직일 수 있습니다: bin/deploy proxy logs"
+	fi
+}
+
+cmd_setup() {
+	require_config
+	require_secrets
+
+	if (( DRY_RUN )); then
+		info "[dry-run] 서버 확인을 건너뜁니다"
+	else
+		step "서버를 확인합니다: $SSH_HOST"
+		ssh_read true || die 3 "SSH 접속에 실패했습니다: $SSH_HOST (포트 $SSH_PORT)"
+		if ! ssh_read "command -v docker >/dev/null"; then
+			err "서버에 docker 가 설치되어 있지 않습니다."
+			die 3 "설치 후 다시 실행하세요: curl -fsSL https://get.docker.com | sh"
+		fi
+		if ! ssh_read "docker info >/dev/null 2>&1"; then
+			err "docker 데몬에 접근할 수 없습니다."
+			die 3 "SSH 사용자를 docker 그룹에 넣으세요: sudo usermod -aG docker \$USER"
+		fi
+		ok "docker 사용 가능"
+	fi
+
+	step "디렉터리·네트워크·볼륨을 만듭니다"
+	ssh_do "mkdir -p '$REMOTE_DIR/backups' '$REMOTE_DIR/proxy'"
+	ssh_do "docker network create '$NETWORK' >/dev/null 2>&1 || true"
+	ssh_do "docker volume create '$DATA_VOLUME' >/dev/null"
+	ssh_do "docker volume create '$CADDY_DATA_VOLUME' >/dev/null"
+	ssh_do "docker volume create '$CADDY_CONFIG_VOLUME' >/dev/null"
+	ok "준비 완료"
+
+	cmd_secrets_push_only
+	proxy_apply install
+	cmd_deploy
+
+	step "다음으로 할 일"
+	info "1. 최초 관리자 계정 만들기:  bin/deploy admin create-user <아이디>"
+	info "2. https://$DOMAIN/admin 에 로그인해 문서를 올리고 색인합니다"
+	info "3. corpus 를 공개하면 /ready 가 200 이 됩니다:  bin/deploy status"
+}
+
+cmd_secrets_push_only() {
+	require_secrets
+	step "시크릿을 서버로 보냅니다: $REMOTE_DIR/env"
+	if (( DRY_RUN )); then
+		info "[dry-run] deploy/secrets.env → $SSH_HOST:$REMOTE_DIR/env (0600)"
+		return 0
+	fi
+	# 임시 파일에 쓴 뒤 mv 로 바꾼다. 반쯤 쓰인 env 로 컨테이너가 뜨지 않게 한다.
+	ssh_pipe "umask 077; mkdir -p '$REMOTE_DIR'; cat > '$REMOTE_DIR/env.tmp' && chmod 600 '$REMOTE_DIR/env.tmp' && mv '$REMOTE_DIR/env.tmp' '$REMOTE_DIR/env'" < "$SECRETS_FILE"
+	ok "전송 완료 (0600)"
+}
+
+cmd_secrets() {
+	require_config
+	local sub="${1:-}"
+	case "$sub" in
+		push)
+			cmd_secrets_push_only
+			if container_running; then
+				info "새 값을 반영하려면 컨테이너를 다시 만들어야 합니다."
+				if confirm "지금 재기동할까요?"; then
+					cmd_redeploy
+				fi
+			fi
+			;;
+		*) die 2 "사용법: bin/deploy secrets push" ;;
+	esac
+}
+
+cmd_redeploy() {
+	require_config
+	local tag
+	tag=$(current_tag)
+	[[ -n "$tag" ]] || die 1 "현재 배포된 태그가 없습니다. 먼저 bin/deploy 를 실행하세요."
+
+	acquire_lock
+	assert_no_active_job
+	swap_to "$tag"
+	if (( DRY_RUN )); then return 0; fi
+	wait_for_health || die 4 "재기동한 컨테이너가 헬스체크를 통과하지 못했습니다."
+	check_ready || true
+	ok "재기동 완료: $tag"
+}
+
+cmd_rollback() {
+	require_config
+	local tag="${1:-}"
+	if [[ -z "$tag" ]]; then
+		tag=$(previous_tag)
+		[[ -n "$tag" ]] || die 1 "돌아갈 이전 릴리스가 없습니다. 태그를 직접 지정하세요: bin/deploy releases"
+	fi
+
+	step "롤백합니다: $tag"
+	acquire_lock
+	ssh_do "docker image inspect '$IMAGE:$tag' >/dev/null 2>&1 || docker pull '$IMAGE:$tag' >/dev/null"
+
+	local cur
+	cur=$(current_tag)
+	swap_to "$tag"
+	if (( DRY_RUN )); then return 0; fi
+
+	if wait_for_health; then
+		if [[ -n "$cur" ]]; then
+			ssh_do "printf '%s\n' '$cur' > '$REMOTE_DIR/previous'"
+		fi
+		record_release "$tag"
+		check_ready || true
+		ok "롤백 완료: ${cur:-없음} → $tag"
+	else
+		die 4 "롤백한 컨테이너가 헬스체크를 통과하지 못했습니다."
+	fi
+}
+
+cmd_releases() {
+	require_config
+	step "배포 이력 (최근 20건)"
+	ssh_read "tail -20 '$REMOTE_DIR/releases' 2>/dev/null || echo '(이력 없음)'"
+	step "서버에 남아 있는 이미지"
+	ssh_read "docker images --filter=reference='$IMAGE' --format '{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'" || true
+}
+
+cmd_status() {
+	require_config
+
+	step "컨테이너"
+	ssh_read "docker ps -a --filter name='^${WEB}\$' --filter name='^${PROXY}\$' --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" || true
+
+	step "릴리스"
+	info "현재: $(current_tag || true)"
+	info "직전: $(previous_tag || true)"
+
+	if container_running; then
+		step "데이터 볼륨"
+		ssh_read "docker exec '$WEB' du -sh /data 2>/dev/null" || true
+
+		step "헬스"
+		local health
+		health=$(probe /health 5 | head -1)
+		if [[ "$health" == "200" ]]; then ok "/health 200"; else err "/health ${health:-응답없음}"; fi
+		check_ready || true
+	else
+		warn "앱 컨테이너가 실행 중이 아닙니다"
+	fi
+
+	step "공개 주소와 인증서"
+	if command -v curl >/dev/null 2>&1; then
+		local code
+		code=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "https://$DOMAIN/health" || echo "실패")
+		info "https://$DOMAIN/health → $code"
+	fi
+	show_certificate
+}
+
+# 실제로 서비스 중인 인증서를 확인한다. Caddy 는 수명의 2/3 지점
+# (Let's Encrypt 90일 기준 만료 30일 전)에 스스로 갱신하므로,
+# 남은 기간이 3주 밑으로 내려갔다면 갱신이 되지 않고 있다는 뜻이다.
+show_certificate() {
+	command -v openssl >/dev/null 2>&1 || return 0
+	local cert enddate
+	cert=$(echo | openssl s_client -connect "$DOMAIN:443" -servername "$DOMAIN" 2>/dev/null || true)
+	if [[ -z "$cert" ]]; then
+		warn "인증서를 조회하지 못했습니다 (연결 실패)"
+		return 0
+	fi
+	enddate=$(printf '%s' "$cert" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+	if [[ -z "$enddate" ]]; then
+		warn "인증서를 읽지 못했습니다"
+		return 0
+	fi
+	if printf '%s' "$cert" | openssl x509 -noout -checkend 1814400 >/dev/null 2>&1; then
+		info "인증서 만료: $enddate (자동 갱신 예정)"
+	else
+		warn "인증서 만료가 3주 안으로 다가왔습니다: $enddate"
+		info "자동 갱신이 실패하고 있을 수 있습니다. 80·443 포트와 DNS 를 확인하세요:"
+		info "  bin/deploy proxy logs"
+	fi
+}
+
+cmd_logs() {
+	require_config
+	local target="${1:-app}" container
+	case "$target" in
+		app|web) container="$WEB" ;;
+		proxy)   container="$PROXY" ;;
+		*)       die 2 "logs 대상은 app 또는 proxy 입니다" ;;
+	esac
+	if (( FOLLOW )); then
+		ssh_tty "docker logs -f --tail $TAIL_LINES '$container'"
+	else
+		ssh_read "docker logs --tail $TAIL_LINES '$container' 2>&1"
+	fi
+}
+
+cmd_exec() {
+	require_config
+	(( $# )) || die 2 "실행할 명령이 필요합니다. 예: bin/deploy exec python -m admin.cli list-users"
+	container_running || die 1 "앱 컨테이너가 실행 중이 아닙니다."
+
+	# 색인은 같은 볼륨에 두 번째 쓰기 프로세스를 붙이는 셈이라 Chroma 가 깨질 수 있다.
+	if [[ "$*" == *build_index* || "$*" == *rebuild* ]]; then
+		warn "색인 작업은 관리자 화면에서 실행하세요."
+		warn "별도 프로세스로 Chroma 에 쓰면 데이터가 손상될 수 있습니다."
+		confirm "그래도 계속할까요?" || exit 0
+	fi
+	# shellcheck disable=SC2046
+	ssh_tty "docker exec -it '$WEB' $(printf '%q ' "$@")"
+}
+
+cmd_console() {
+	require_config
+	container_running || die 1 "앱 컨테이너가 실행 중이 아닙니다."
+	ssh_tty "docker exec -it '$WEB' bash"
+}
+
+cmd_admin() {
+	require_config
+	(( $# )) || die 2 "인자가 필요합니다. 예: bin/deploy admin create-user boss"
+	container_running || die 1 "앱 컨테이너가 실행 중이 아닙니다. 먼저 bin/deploy 를 실행하세요."
+	# shellcheck disable=SC2046
+	ssh_tty "docker exec -it '$WEB' python -m admin.cli $(printf '%q ' "$@")"
+}
+
+cmd_proxy() {
+	require_config
+	local sub="${1:-reload}"
+	case "$sub" in
+		install) proxy_apply install ;;
+		reload)  proxy_apply reload ;;
+		restart) ssh_do "docker restart '$PROXY' >/dev/null"; ok "프록시를 재시작했습니다" ;;
+		logs)
+			if (( FOLLOW )); then
+				ssh_tty "docker logs -f --tail $TAIL_LINES '$PROXY'"
+			else
+				ssh_read "docker logs --tail $TAIL_LINES '$PROXY' 2>&1"
+			fi
+			;;
+		*) die 2 "사용법: bin/deploy proxy install|reload|restart|logs" ;;
+	esac
+}
+
+cmd_backup() {
+	require_config
+	local sub="${1:-create}"
+
+	case "$sub" in
+		list)
+			step "서버의 백업"
+			ssh_read "ls -lh '$REMOTE_DIR/backups' 2>/dev/null || echo '(백업 없음)'"
+			return 0
+			;;
+		pull)
+			local name="${2:-}"
+			[[ -n "$name" ]] || die 2 "받아올 백업 이름이 필요합니다: bin/deploy backup pull <이름>"
+			mkdir -p "$ROOT/backups"
+			step "백업을 내려받습니다: $name"
+			ssh_read "cat '$REMOTE_DIR/backups/$name'" > "$ROOT/backups/$name"
+			ok "저장 위치: backups/$name"
+			return 0
+			;;
+	esac
+
+	local img
+	img=$(running_image)
+	[[ -n "$img" ]] || die 1 "앱 컨테이너가 없습니다. 먼저 배포하세요."
+
+	local name="$APP_NAME-$(date +%Y%m%d-%H%M%S).tar.gz"
+
+	if (( HOT_BACKUP )); then
+		warn "무정지 백업입니다. app.db 와 chroma.sqlite3 가 WAL 모드라"
+		warn "복원했을 때의 일관성이 보장되지 않습니다."
+		confirm "계속할까요?" || exit 0
+	else
+		step "일관된 스냅샷을 위해 앱을 잠시 정지합니다"
+		stop_app
+	fi
+
+	step "백업을 만듭니다: $name"
+	ssh_do "docker run --rm --user root \
+		-v '$DATA_VOLUME':/data:ro \
+		-v '$REMOTE_DIR/backups':/backup \
+		'$img' tar czf '/backup/$name' -C /data ."
+
+	if (( ! HOT_BACKUP )); then
+		step "앱을 다시 시작합니다"
+		ssh_do "docker start '$WEB' >/dev/null"
+		if (( ! DRY_RUN )); then
+			wait_for_health || warn "백업 후 재기동한 컨테이너가 헬스체크를 통과하지 못했습니다"
+		fi
+	fi
+
+	ssh_read "ls -lh '$REMOTE_DIR/backups/$name'" || true
+	ok "백업 완료"
+}
+
+cmd_restore() {
+	require_config
+	local name="${1:-}"
+	[[ -n "$name" ]] || die 2 "복원할 백업 이름이 필요합니다. 목록: bin/deploy backup list"
+
+	local img
+	img=$(running_image)
+	[[ -n "$img" ]] || die 1 "앱 컨테이너가 없습니다."
+
+	warn "$DATA_VOLUME 의 현재 데이터를 모두 지우고 $name 으로 되돌립니다."
+	warn "벡터, 문서, 관리자 계정, 감사 로그가 전부 백업 시점으로 돌아갑니다."
+	confirm "계속할까요?" || exit 0
+	if (( ! ASSUME_YES )); then
+		local reply
+		printf '    확인을 위해 %s 를 입력하세요: ' "$APP_NAME" >&2
+		read -r reply </dev/tty
+		[[ "$reply" == "$APP_NAME" ]] || die 2 "취소했습니다"
+	fi
+
+	step "되돌리기 전에 현재 상태를 백업해 둡니다"
+	ASSUME_YES=1 cmd_backup
+
+	step "볼륨을 복원합니다"
+	stop_app
+	ssh_do "docker run --rm --user root \
+		-v '$DATA_VOLUME':/data \
+		-v '$REMOTE_DIR/backups':/backup:ro \
+		'$img' sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /backup/$name -C /data && chown -R appuser:appuser /data'"
+	ssh_do "docker start '$WEB' >/dev/null"
+
+	if (( DRY_RUN )); then return 0; fi
+	wait_for_health || die 4 "복원 후 컨테이너가 헬스체크를 통과하지 못했습니다."
+	check_ready || true
+	ok "복원 완료: $name"
+}
+
+cmd_unlock() {
+	require_config
+	local owner
+	owner=$(ssh_read "cat '$REMOTE_DIR/deploy.lock/owner' 2>/dev/null" || true)
+	if [[ -z "$owner" ]] && ! ssh_read "test -d '$REMOTE_DIR/deploy.lock'"; then
+		ok "잠겨 있지 않습니다"
+		return 0
+	fi
+	warn "락 소유자: ${owner:-알 수 없음}"
+	confirm "정말 해제할까요? 배포가 실제로 진행 중이면 위험합니다." || exit 0
+	ssh_do "rm -f '$REMOTE_DIR/deploy.lock/owner'; rmdir '$REMOTE_DIR/deploy.lock' 2>/dev/null || true"
+	ok "배포 락을 해제했습니다"
+}
+
+# ── 디스패치 ─────────────────────────────────────────────────────────
+
+load_config
+
+# 읽기 전용 명령에는 --dry-run 이 의미가 없다. 실제 상태를 보여준다.
+case "$CMD" in
+	status|ps|releases|logs) DRY_RUN=0 ;;
+esac
+
+case "$CMD" in
+	setup)     cmd_setup ;;
+	deploy)    cmd_deploy ;;
+	redeploy)  cmd_redeploy ;;
+	rollback)  cmd_rollback "${ARGS[@]}" ;;
+	releases)  cmd_releases ;;
+	status|ps) cmd_status ;;
+	logs)      cmd_logs "${ARGS[@]}" ;;
+	exec)      cmd_exec "${ARGS[@]}" ;;
+	console)   cmd_console ;;
+	admin)     cmd_admin "${ARGS[@]}" ;;
+	secrets)   cmd_secrets "${ARGS[@]}" ;;
+	proxy)     cmd_proxy "${ARGS[@]}" ;;
+	backup)    cmd_backup "${ARGS[@]}" ;;
+	restore)   cmd_restore "${ARGS[@]}" ;;
+	unlock)    cmd_unlock ;;
+	*)         err "알 수 없는 명령: $CMD"; usage; exit 2 ;;
+esac

@@ -11,3 +11,9 @@ docs
 chroma_db
 tests
 .omc
+
+# 배포 도구는 이미지 안에서 쓸 일이 없다. 시크릿이 빌드 컨텍스트로
+# 전송되는 것도 막는다.
+bin
+deploy
+backups

@@ -1,0 +1,51 @@
+# Caddy 리버스 프록시 설정 템플릿.
+#
+# bin/deploy 가 {{...}} 자리를 deploy/config.env 값으로 치환해
+# 서버의 $REMOTE_DIR/Caddyfile 로 보낸다. 이 파일을 직접 서버에 두지 않는다.
+# 바꾼 내용을 반영하려면:  bin/deploy proxy reload
+
+{
+	email {{ACME_EMAIL}}
+
+	# 인증서 발급을 시험할 때는 아래 주석을 풀어 스테이징 CA를 쓴다.
+	# 프로덕션 CA는 실패가 반복되면 발급 한도에 걸린다.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{{DOMAIN}} {
+	encode zstd gzip
+
+	# 앱의 MAX_UPLOAD_BYTES(기본 20MB)보다 조금 크게 잡는다.
+	request_body {
+		max_size 25MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	# route 안의 지시문은 적힌 순서대로 평가된다.
+	# 차단 규칙이 프록시보다 먼저 와야 하므로 route 로 순서를 못박는다.
+	route {
+{{PRIVATE_GUARD}}
+		reverse_proxy {{APP_NAME}}-web:8000 {
+			# 배포는 구 컨테이너를 세우고 새 컨테이너를 띄운다. 그 몇 초 동안
+			# 여기서 요청을 붙들고 재시도해 502 대신 "조금 느린 응답"으로 만든다.
+			# 이것이 이 프로젝트에서 체감 무중단을 만드는 유일한 장치다.
+			lb_try_duration {{LB_TRY_DURATION}}
+			lb_try_interval 250ms
+			fail_duration 0
+
+			header_up X-Real-IP {remote_host}
+
+			# 색인·업로드 응답이 오래 걸릴 수 있으므로 읽기 타임아웃은 두지 않는다.
+			transport http {
+				dial_timeout 5s
+			}
+		}
+	}
+}

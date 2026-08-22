@@ -2,9 +2,15 @@
 data/
 chroma_db/
 
+# bin/deploy backup pull 로 내려받은 사본
+backups/
+
 # Secrets
 .env
 .env.backup*
+deploy/secrets.env
+deploy/config.env
+deploy/config.env
 
 # Python
 __pycache__/
