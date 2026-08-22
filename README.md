@@ -389,6 +389,10 @@ cp deploy/config.env.example deploy/config.env
 `ADMIN_ALLOW_IPS`에는 관리자 화면에 접속할 IP를 넣습니다. 자기 공인 IP는
 `curl -s https://api.ipify.org`로 확인합니다.
 
+서버 접속에 특정 키를 써야 하면 `SSH_KEY`에 경로를 지정합니다. 비워두면
+ssh 기본 동작(`~/.ssh/id_*`, ssh-agent, `~/.ssh/config`)에 맡깁니다.
+`Permission denied (publickey)`가 나면 이 값을 확인하세요.
+
 `deploy/config.env`와 `deploy/secrets.env`는 둘 다 `.gitignore`에 있습니다.
 이 저장소가 공개되어 있어 서버 주소가 히스토리에 남지 않게 한 것입니다.
 `.example` 파일만 커밋됩니다.
