@@ -42,6 +42,96 @@ class UploadResult:
         return len(self.saved)
 
 
+@dataclass
+class FilenameRepairResult:
+    renamed: list[tuple[str, str]]  # (기존 이름, 복구한 이름)
+    skipped: list[tuple[str, str]]  # (기존 이름, 사유)
+
+
+@dataclass(frozen=True)
+class DocumentPurgeResult:
+    removed_documents: int
+    removed_chunks: int
+    removed_collections: tuple[str, ...]
+
+
+_ZIP_UTF8_FLAG = 0x800
+
+
+def _contains_hangul(value: str) -> bool:
+    return any(
+        "\u1100" <= char <= "\u11ff"
+        or "\u3130" <= char <= "\u318f"
+        or "\uac00" <= char <= "\ud7a3"
+        for char in value
+    )
+
+
+def _looks_like_cp437_mojibake(value: str) -> bool:
+    """CP949 바이트를 CP437로 읽을 때 흔한 그래픽 문자가 있는지 확인한다."""
+    return any(
+        "\u2500" <= char <= "\u257f"  # box drawing
+        or "\u2580" <= char <= "\u259f"  # block elements
+        for char in value
+    )
+
+
+def detect_zip_filename(filename: str, flag_bits: int = 0) -> tuple[str, str]:
+    """ZipInfo의 이름을 UTF-8/CP949/CP437 중 판별해 ``(이름, 인코딩)`` 반환.
+
+    ZIP의 UTF-8 플래그가 없으면 Python은 명세의 기본값인 CP437로 먼저
+    디코딩한다. 그 문자열을 다시 CP437 바이트로 되돌린 뒤 다음 순서로
+    판별한다.
+
+    1. UTF-8로 완전히 디코딩되면 UTF-8
+    2. CP949로 완전히 디코딩되고 한글이 확인되면 CP949
+    3. 나머지는 ZIP 표준 기본값인 CP437
+
+    한 글자짜리 CP949 이름은 CP437 해석에 박스 문자 같은 전형적인 깨짐이
+    있을 때만 선택한다. 예를 들어 정상 CP437 이름인 ``über.md``를 CP949
+    한글 한 글자로 오인하는 것을 막기 위해서다.
+    """
+    normalized = unicodedata.normalize("NFC", filename)
+    if flag_bits & _ZIP_UTF8_FLAG:
+        return normalized, "utf-8"
+
+    try:
+        raw_name = filename.encode("cp437")
+    except UnicodeEncodeError:
+        # 이미 Unicode 문자열로 정상 전달된 이름이다.
+        return normalized, "utf-8"
+
+    if raw_name.isascii():
+        return normalized, "cp437"
+
+    try:
+        decoded_utf8 = raw_name.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    else:
+        return unicodedata.normalize("NFC", decoded_utf8), "utf-8"
+
+    try:
+        decoded_cp949 = raw_name.decode("cp949")
+    except UnicodeDecodeError:
+        return normalized, "cp437"
+
+    hangul_count = sum(1 for char in decoded_cp949 if _contains_hangul(char))
+    if hangul_count >= 2 or (
+        hangul_count == 1 and _looks_like_cp437_mojibake(filename)
+    ):
+        return unicodedata.normalize("NFC", decoded_cp949), "cp949"
+    return normalized, "cp437"
+
+
+def repairable_filename(filename: str) -> str | None:
+    """과거 ZIP 처리에서 CP437로 잘못 저장된 이름이면 복구 이름을 반환한다."""
+    repaired, encoding = detect_zip_filename(filename)
+    if encoding in {"utf-8", "cp949"} and repaired != filename:
+        return repaired
+    return None
+
+
 def sanitize_filename(raw_name: str, allowed_extensions: tuple[str, ...]) -> str:
     """안전한 basename을 돌려준다. 위험하면 UploadError.
 
@@ -141,10 +231,13 @@ def _extract_zip(cfg, zip_name: str, content: bytes, result: UploadResult) -> No
         for info in archive.infolist():
             if info.is_dir():
                 continue
-            entry_label = f"{zip_name}:{info.filename}"
+            decoded_name, _encoding = detect_zip_filename(
+                info.filename, info.flag_bits
+            )
+            entry_label = f"{zip_name}:{decoded_name}"
             try:
                 # 엔트리 이름에도 동일한 sanitize를 적용한다 (zip slip 방어).
-                safe_name = sanitize_filename(info.filename, kind.file_extensions)
+                safe_name = sanitize_filename(decoded_name, kind.file_extensions)
                 with archive.open(info) as handle:
                     entry_content = handle.read(config.MAX_UNZIPPED_BYTES + 1)
                 if len(entry_content) > config.MAX_UNZIPPED_BYTES:
@@ -155,6 +248,53 @@ def _extract_zip(cfg, zip_name: str, content: bytes, result: UploadResult) -> No
             except Exception:
                 logger.exception("zip 항목 처리 실패: %s", entry_label)
                 result.rejected.append((entry_label, "처리할 수 없는 항목입니다."))
+
+
+def count_repairable_filenames(
+    cfg, document_list: list[DocumentInfo] | None = None
+) -> int:
+    """과거 ZIP 인코딩 오류로 복구할 수 있는 파일명 수를 센다."""
+    documents_to_check = (
+        document_list if document_list is not None else list_documents(cfg)
+    )
+    return sum(
+        1
+        for doc in documents_to_check
+        if repairable_filename(doc.filename) is not None
+    )
+
+
+def repair_legacy_zip_filenames(cfg) -> FilenameRepairResult:
+    """CP437로 잘못 저장된 UTF-8/CP949 파일명을 안전하게 제자리 복구한다.
+
+    같은 복구 이름의 파일이 이미 있으면 덮어쓰지 않는다. 파일명은 색인의
+    source_path와 제목에도 들어가므로 호출자는 한 건이라도 바뀐 경우 전체
+    재색인이 필요하다는 상태를 표시해야 한다.
+    """
+    kind = kind_of(cfg)
+    result = FilenameRepairResult(renamed=[], skipped=[])
+
+    for doc in list_documents(cfg):
+        repaired = repairable_filename(doc.filename)
+        if repaired is None:
+            continue
+        try:
+            safe_name = sanitize_filename(repaired, kind.file_extensions)
+            source = _target_path(cfg, doc.filename)
+            target = _target_path(cfg, safe_name)
+            if target.exists():
+                result.skipped.append(
+                    (doc.filename, "복구할 이름의 파일이 이미 있습니다.")
+                )
+                continue
+            source.rename(target)
+            result.renamed.append((doc.filename, safe_name))
+        except (OSError, UploadError) as exc:
+            logger.exception("ZIP 파일명 복구 실패: %s", doc.filename)
+            result.skipped.append(
+                (doc.filename, str(exc) or "복구할 수 없습니다.")
+            )
+    return result
 
 
 def list_documents(cfg, query: str = "") -> list[DocumentInfo]:
@@ -241,3 +381,25 @@ def delete_all_documents(cfg) -> int:
     n = len(list_documents(cfg))
     shutil.rmtree(resolved, ignore_errors=True)
     return n
+
+
+def purge_documents(cfg) -> DocumentPurgeResult:
+    """corpus의 모든 원본과 모든 버전의 검색 색인을 수량 제한 없이 지운다."""
+    from ingest.store import count_documents as count_indexed_chunks
+    from ingest.store import drop_collection, list_collections
+
+    removed_documents = delete_all_documents(cfg)
+    collection_names = tuple(
+        name
+        for name in list_collections()
+        if name == cfg.base_collection or name.startswith(f"{cfg.base_collection}_v")
+    )
+    removed_chunks = sum(count_indexed_chunks(name) for name in collection_names)
+    for name in collection_names:
+        drop_collection(name)
+
+    return DocumentPurgeResult(
+        removed_documents=removed_documents,
+        removed_chunks=removed_chunks,
+        removed_collections=collection_names,
+    )

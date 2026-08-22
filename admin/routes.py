@@ -223,13 +223,21 @@ async def corpus_detail(
     user: AdminUser = Depends(require_admin),
 ) -> HTMLResponse:
     cfg = _get_corpus(corpus_id)
+    all_documents = documents.list_documents(cfg)
+    document_list = (
+        all_documents if not q.strip() else documents.list_documents(cfg, q)
+    )
     return render(
         request,
         "corpus_detail.html",
         {
             "cfg": cfg,
             "kind": corpora.kind_of(cfg),
-            "documents": documents.list_documents(cfg, q),
+            "documents": document_list,
+            "document_count": len(all_documents),
+            "repairable_filenames": documents.count_repairable_filenames(
+                cfg, all_documents
+            ),
             "query": q,
             "chunks": count_indexed_chunks(cfg.active_collection),
             "jobs": jobs.list_for_corpus(cfg.id),
@@ -477,6 +485,100 @@ async def upload_documents(
     if len(result.rejected) > 10:
         flash(request, f"그 외 {len(result.rejected) - 10}건이 더 거부되었습니다.", "error")
 
+    return _redirect(f"/admin/corpora/{corpus_id}")
+
+
+@router.post("/corpora/{corpus_id}/documents/repair-filenames")
+async def repair_document_filenames(
+    corpus_id: str,
+    request: Request,
+    user: AdminUser = Depends(require_admin),
+    csrf: str = Form(""),
+):
+    """예전 ZIP 업로드에서 CP437로 잘못 저장된 UTF-8/CP949 이름을 복구한다."""
+    verify_csrf(request, csrf)
+    cfg = _get_corpus(corpus_id)
+    active = jobs.active_job_for(cfg.id)
+    if active is not None:
+        flash(
+            request,
+            f"진행 중인 색인 작업(#{active.id})이 끝난 뒤 파일명을 복구하세요.",
+            "error",
+        )
+        return _redirect(f"/admin/corpora/{corpus_id}")
+
+    result = await asyncio.to_thread(documents.repair_legacy_zip_filenames, cfg)
+
+    if result.renamed:
+        corpora.update(cfg, needs_rebuild=True)
+    audit.record(
+        user.username,
+        "documents.filenames_repaired",
+        cfg.id,
+        renamed=len(result.renamed),
+        skipped=len(result.skipped),
+    )
+
+    if result.renamed:
+        flash(
+            request,
+            f"한글 파일명 {len(result.renamed)}개를 복구했습니다. "
+            "검색 결과의 제목도 고치려면 전체 재색인을 실행하세요.",
+            "success",
+        )
+    else:
+        flash(request, "복구할 파일명이 없습니다.", "info")
+    if result.skipped:
+        flash(
+            request,
+            f"이름 충돌 또는 파일 오류로 {len(result.skipped)}개는 복구하지 못했습니다.",
+            "error",
+        )
+    return _redirect(f"/admin/corpora/{corpus_id}")
+
+
+@router.post("/corpora/{corpus_id}/documents/delete-all")
+async def delete_all_documents_route(
+    corpus_id: str,
+    request: Request,
+    user: AdminUser = Depends(require_admin),
+    csrf: str = Form(""),
+    confirm: str = Form(""),
+):
+    """개별 체크박스나 폼 필드 개수 제한 없이 corpus 문서 전체를 삭제한다."""
+    verify_csrf(request, csrf)
+    cfg = _get_corpus(corpus_id)
+
+    if confirm.strip() != cfg.id:
+        flash(request, "전체 삭제 확인을 위해 corpus 주소를 정확히 입력하세요.", "error")
+        return _redirect(f"/admin/corpora/{corpus_id}")
+
+    active = jobs.active_job_for(cfg.id)
+    if active is not None:
+        flash(
+            request,
+            f"진행 중인 색인 작업(#{active.id})이 끝난 뒤 전체 삭제하세요.",
+            "error",
+        )
+        return _redirect(f"/admin/corpora/{corpus_id}")
+
+    result = await asyncio.to_thread(documents.purge_documents, cfg)
+    if cfg.needs_rebuild:
+        corpora.update(cfg, needs_rebuild=False)
+    audit.record(
+        user.username,
+        "documents.all_deleted",
+        cfg.id,
+        documents=result.removed_documents,
+        chunks=result.removed_chunks,
+        collections=result.removed_collections,
+    )
+    flash(
+        request,
+        f"문서 {result.removed_documents}개와 검색 색인 "
+        f"{result.removed_chunks}개를 모두 삭제했습니다.",
+        "success",
+    )
     return _redirect(f"/admin/corpora/{corpus_id}")
 
 

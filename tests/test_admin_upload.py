@@ -12,8 +12,12 @@ import pytest
 import config
 from admin.documents import (
     UploadError,
+    count_repairable_filenames,
     delete_documents,
+    detect_zip_filename,
     list_documents,
+    purge_documents,
+    repair_legacy_zip_filenames,
     sanitize_filename,
     save_upload,
     save_uploads,
@@ -146,6 +150,17 @@ def _zip_bytes(entries: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+def _unflagged_zip_bytes(filename: str, encoding: str) -> bytes:
+    """ASCII 이름으로 만든 ZIP 헤더를 원하는 원시 파일명 바이트로 바꾼다."""
+    raw_name = filename.encode(encoding)
+    placeholder = b"x" * len(raw_name)
+    payload = _zip_bytes({placeholder.decode("ascii"): BODY.encode("utf-8")})
+    # 로컬 헤더와 중앙 디렉터리의 동일한 이름 두 곳이 바뀐다. 길이는 같아서
+    # 다른 ZIP 필드를 다시 계산할 필요가 없다.
+    assert payload.count(placeholder) == 2
+    return payload.replace(placeholder, raw_name)
+
+
 def test_zip_is_extracted(plain_corpus):
     payload = _zip_bytes({
         "규정1.md": BODY.encode("utf-8"),
@@ -156,6 +171,32 @@ def test_zip_is_extracted(plain_corpus):
 
     assert set(result.saved) == {"규정1.md", "규정2.md"}
     assert len(list_documents(plain_corpus)) == 2
+
+
+@pytest.mark.parametrize(
+    ("filename", "encoding"),
+    [
+        ("학교 규정.md", "utf-8"),
+        ("학교 규정.md", "cp949"),
+        ("café.md", "cp437"),
+    ],
+)
+def test_zip_detects_unflagged_filename_encoding(
+    plain_corpus, filename, encoding
+):
+    payload = _unflagged_zip_bytes(filename, encoding)
+
+    result = save_uploads(plain_corpus, [("묶음.zip", payload)])
+
+    assert result.saved == [filename]
+    assert (plain_corpus.docs_dir() / filename).exists()
+
+
+def test_zip_detection_does_not_mistake_cp437_umlaut_for_cp949():
+    decoded, encoding = detect_zip_filename("über.md".encode("cp437").decode("cp437"))
+
+    assert decoded == "über.md"
+    assert encoding == "cp437"
 
 
 def test_zip_slip_is_blocked(plain_corpus):
@@ -208,6 +249,53 @@ def test_corrupt_zip_is_reported(plain_corpus):
 
     assert result.saved == []
     assert "손상된" in result.rejected[0][1]
+
+
+# ---------------------------------------------------------------------------
+# 과거 ZIP 파일명 복구
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("encoding", ["utf-8", "cp949"])
+def test_repairs_previously_misdecoded_zip_filename(plain_corpus, encoding):
+    correct_name = "학교 규정.md"
+    broken_name = correct_name.encode(encoding).decode("cp437")
+    broken_path = plain_corpus.docs_dir() / broken_name
+    broken_path.parent.mkdir(parents=True, exist_ok=True)
+    broken_path.write_text(BODY, encoding="utf-8")
+
+    assert count_repairable_filenames(plain_corpus) == 1
+
+    result = repair_legacy_zip_filenames(plain_corpus)
+
+    assert result.renamed == [(broken_name, correct_name)]
+    assert result.skipped == []
+    assert not broken_path.exists()
+    assert (plain_corpus.docs_dir() / correct_name).exists()
+
+
+def test_repair_leaves_real_cp437_filename_unchanged(plain_corpus):
+    save_upload(plain_corpus, "café.md", BODY.encode("utf-8"))
+
+    result = repair_legacy_zip_filenames(plain_corpus)
+
+    assert result.renamed == []
+    assert result.skipped == []
+    assert (plain_corpus.docs_dir() / "café.md").exists()
+
+
+def test_repair_does_not_overwrite_existing_filename(plain_corpus):
+    correct_name = "학교 규정.md"
+    broken_name = correct_name.encode("cp949").decode("cp437")
+    save_upload(plain_corpus, correct_name, BODY.encode("utf-8"))
+    broken_path = plain_corpus.docs_dir() / broken_name
+    broken_path.write_text("다른 본문", encoding="utf-8")
+
+    result = repair_legacy_zip_filenames(plain_corpus)
+
+    assert result.renamed == []
+    assert len(result.skipped) == 1
+    assert broken_path.exists()
+    assert (plain_corpus.docs_dir() / correct_name).read_text(encoding="utf-8") == BODY
 
 
 # ---------------------------------------------------------------------------
@@ -318,3 +406,28 @@ def test_delete_all_works_for_normal_corpus(plain_corpus):
 
     assert n == 1
     assert not docs_dir.exists()
+
+
+def test_purge_removes_unlimited_documents_and_search_index(
+    plain_corpus, patch_embed
+):
+    from ingest.build_index import build_index
+    from ingest.store import collection_exists, count_documents
+
+    for number in range(25):
+        save_upload(
+            plain_corpus,
+            f"규정-{number}.md",
+            f"{number}\n{BODY}".encode("utf-8"),
+        )
+    build_index(plain_corpus)
+    indexed_chunks = count_documents(plain_corpus.active_collection)
+    assert indexed_chunks > 0
+
+    result = purge_documents(plain_corpus)
+
+    assert result.removed_documents == 25
+    assert result.removed_chunks == indexed_chunks
+    assert result.removed_collections == (plain_corpus.active_collection,)
+    assert list_documents(plain_corpus) == []
+    assert not collection_exists(plain_corpus.active_collection)

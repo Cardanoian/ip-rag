@@ -150,6 +150,31 @@ def test_full_corpus_lifecycle_through_admin(client):
     assert names == {"inventions", "school-violence"}
 
 
+def test_admin_repairs_legacy_zip_filenames_and_requires_rebuild(client):
+    _create_corpus(client, "school-violence", "학교폭력 규정")
+    cfg = corpora.get("school-violence")
+    correct_name = "학교폭력 정의.md"
+    broken_name = correct_name.encode("cp949").decode("cp437")
+    broken_path = cfg.docs_dir() / broken_name
+    broken_path.write_text(REGULATION_BODY, encoding="utf-8")
+
+    detail = client.get("/admin/corpora/school-violence")
+    assert "한글 파일명 복구" in detail.text
+
+    response = client.post(
+        "/admin/corpora/school-violence/documents/repair-filenames",
+        data={"csrf": _csrf(client, "/admin/corpora/school-violence")},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert not broken_path.exists()
+    assert (cfg.docs_dir() / correct_name).exists()
+    assert corpora.get("school-violence").needs_rebuild is True
+    repaired_page = client.get(response.headers["location"])
+    assert "한글 파일명 1개를 복구했습니다" in repaired_page.text
+
+
 def test_two_corpora_do_not_bleed_into_each_other(client):
     """서로 다른 주제의 corpus가 한 서버에서 독립적으로 동작해야 한다."""
     for slug, label, body, filename in [
@@ -236,6 +261,49 @@ def test_deleting_document_removes_it_from_search(client):
         "/v1/corpora/school-violence/search", json={"text": "질의", "top_k": 10}
     ).json()
     assert {r["title"] for r in after["results"]} == {"학교폭력 정의"}
+
+
+def test_delete_all_documents_has_no_document_count_form_limit(client):
+    from admin.documents import list_documents
+    from ingest.store import count_documents
+
+    _create_corpus(client, "school-violence", "학교폭력 규정")
+    for number in range(25):
+        _upload(
+            client,
+            "school-violence",
+            f"학교폭력 규정 {number}.md",
+            f"{number}\n{REGULATION_BODY}",
+        )
+    _reindex_and_wait(client, "school-violence")
+    cfg = corpora.update(corpora.get("school-violence"), needs_rebuild=True)
+    assert count_documents(cfg.active_collection) > 0
+
+    path = "/admin/corpora/school-violence/documents/delete-all"
+    rejected = client.post(
+        path,
+        data={
+            "csrf": _csrf(client, "/admin/corpora/school-violence"),
+            "confirm": "wrong",
+        },
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 303
+    assert len(list_documents(cfg)) == 25
+
+    response = client.post(
+        path,
+        data={
+            "csrf": _csrf(client, "/admin/corpora/school-violence"),
+            "confirm": "school-violence",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert list_documents(cfg) == []
+    assert count_documents(cfg.active_collection) == 0
+    assert corpora.get("school-violence").needs_rebuild is False
 
 
 # ---------------------------------------------------------------------------
