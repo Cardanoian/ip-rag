@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }} 설정{% endblock %}
+{% block content %}
+<h1>{{ cfg.label }} 설정</h1>
+<p class="subtitle">
+  <span class="mono">{{ cfg.id }}</span> ·
+  종류 <span class="mono">{{ cfg.kind }}</span> ·
+  corpus 주소와 종류는 만든 뒤에 바꿀 수 없습니다.
+</p>
+
+<form method="post" action="/admin/corpora/{{ cfg.id }}/settings">
+  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+
+  <div class="card">
+    <h2 style="margin-top:0">기본 정보</h2>
+    <div class="grid2">
+      <div class="field">
+        <label for="label">이름</label>
+        <input id="label" name="label" type="text" required value="{{ cfg.label }}">
+      </div>
+      <div class="field">
+        <label for="corpus_id_value">데이터셋 식별자</label>
+        <input id="corpus_id_value" name="corpus_id_value" type="text" required
+               value="{{ cfg.corpus_id }}">
+        <div class="hint">검색 응답에 실려 출처를 구분합니다. 재색인이 필요 없습니다.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">임베딩 지시문</h2>
+    <div class="field">
+      <label for="doc_prefix">문서 지시문 <span class="hint" style="display:inline">— 바꾸면 전체 재색인 필요</span></label>
+      <textarea id="doc_prefix" name="doc_prefix" required>{{ cfg.doc_prefix.strip() }}</textarea>
+    </div>
+    <div class="field">
+      <label for="query_prefix">질의 지시문 <span class="hint" style="display:inline">— 재색인 불필요</span></label>
+      <textarea id="query_prefix" name="query_prefix" required>{{ cfg.query_prefix.strip() }}</textarea>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">색인 설정</h2>
+    <p class="hint" style="margin-top:0">
+      아래 항목은 기존 벡터를 무의미하게 만듭니다. 바꾸면 전체 재색인이 필요하고,
+      임베딩 차원은 저장 즉시 재색인이 자동으로 시작됩니다.
+    </p>
+    <div class="grid2">
+      <div class="field">
+        <label for="embed_dim">임베딩 차원</label>
+        <input id="embed_dim" name="embed_dim" type="number" min="128" max="3072"
+               value="{{ cfg.embed_dim }}">
+      </div>
+      <div class="field">
+        <label for="chunk_size">청크 크기(자)</label>
+        <input id="chunk_size" name="chunk_size" type="number" min="100"
+               value="{{ cfg.chunk_size }}">
+      </div>
+      <div class="field">
+        <label for="chunk_overlap">청크 겹침(자)</label>
+        <input id="chunk_overlap" name="chunk_overlap" type="number" min="0"
+               value="{{ cfg.chunk_overlap }}">
+      </div>
+      <div class="field">
+        <label for="single_chunk_char_hint">단일 청크 한도(자)</label>
+        <input id="single_chunk_char_hint" name="single_chunk_char_hint" type="number" min="100"
+               value="{{ cfg.single_chunk_char_hint }}">
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button type="submit" class="primary">저장</button>
+    <a class="btn" href="/admin/corpora/{{ cfg.id }}">취소</a>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}관리{% endblock %} · 유사 자료 검색</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --border: #d8dce3;
+      --text: #1c2024;
+      --muted: #667085;
+      --accent: #2f5fd0;
+      --accent-soft: #eaf0fd;
+      --danger: #c0392b;
+      --danger-soft: #fdecea;
+      --success: #1e7d44;
+      --success-soft: #e7f6ec;
+      --warning: #92650a;
+      --warning-soft: #fdf3d8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo",
+                   "Noto Sans KR", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    a { color: var(--accent); }
+    header.topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      flex-wrap: wrap;
+      min-height: 56px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand { font-weight: 700; text-decoration: none; color: var(--text); }
+    nav.topnav { display: flex; gap: 16px; flex: 1; flex-wrap: wrap; }
+    nav.topnav a { text-decoration: none; font-size: 14px; }
+    .whoami { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+    .role-tag {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 24px 24px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 17px; margin: 28px 0 10px; }
+    .subtitle { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px 20px;
+      margin-bottom: 18px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+    th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+    tbody tr:last-child td { border-bottom: none; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .hint { font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 3px; }
+    input[type=text], input[type=password], input[type=number], input[type=search], textarea, select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font: inherit;
+      background: #fff;
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    .field { margin-bottom: 14px; }
+    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+    button, .btn {
+      font: inherit;
+      font-size: 14px;
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      color: var(--text);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    button.link { border: none; background: none; color: var(--accent); padding: 4px; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 10px; font-size: 14px; border: 1px solid transparent; }
+    .flash.success { background: var(--success-soft); color: var(--success); border-color: #b7e0c4; }
+    .flash.error   { background: var(--danger-soft); color: var(--danger); border-color: #f2c2bc; }
+    .flash.warning { background: var(--warning-soft); color: var(--warning); border-color: #ecd9a0; }
+    .flash.info    { background: var(--accent-soft); color: var(--accent); border-color: #c5d6f7; }
+    .status { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+    .status-published   { background: var(--success-soft); color: var(--success); }
+    .status-draft       { background: var(--warning-soft); color: var(--warning); }
+    .status-unpublished { background: #eceff3; color: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .muted { color: var(--muted); }
+    .progress { height: 8px; background: #e6e9ee; border-radius: 4px; overflow: hidden; }
+    .progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+    .danger-zone { border-color: #f2c2bc; background: #fffafa; }
+    .empty { color: var(--muted); font-size: 14px; padding: 18px 0; text-align: center; }
+  </style>
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/admin/">유사 자료 검색 관리</a>
+  <nav class="topnav">
+    <a href="/admin/">대시보드</a>
+    <a href="/admin/corpora/new">새 corpus</a>
+    {% if user.is_superadmin %}
+      <a href="/admin/users">관리자 계정</a>
+      <a href="/admin/audit">감사 로그</a>
+    {% endif %}
+    <a href="/admin/account/password">비밀번호 변경</a>
+  </nav>
+  <div class="whoami">
+    <span>{{ user.username }}</span>
+    <span class="role-tag">{{ "최고관리자" if user.is_superadmin else "일반관리자" }}</span>
+    <form method="post" action="/admin/logout" style="margin:0">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <button type="submit" class="link">로그아웃</button>
+    </form>
+  </div>
+</header>
+{% endif %}
+
+<main>
+  {% for flash in flashes %}
+    <div class="flash {{ flash.level }}">{{ flash.message }}</div>
+  {% endfor %}
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

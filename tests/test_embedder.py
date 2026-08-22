@@ -19,14 +19,38 @@ import config
 # 헬퍼: 가짜 ContentEmbedding / EmbedContentResponse
 # ---------------------------------------------------------------------------
 
-def _make_fake_embedding(dim: int = config.EMBED_DIM) -> Any:
+from corpora.models import CorpusConfig
+
+# 임베딩은 corpus 설정에서 지시문 프리픽스와 차원을 받는다.
+CFG = CorpusConfig(
+    id="test",
+    kind="plain",
+    label="테스트",
+    corpus_id="test",
+    base_collection="test",
+    doc_prefix="[검색 대상 문서] 테스트 문서입니다.\n",
+    query_prefix="[검색 질의] 테스트 질의입니다.\n",
+    embed_dim=1536,
+    chunk_size=1000,
+    chunk_overlap=150,
+    single_chunk_char_hint=5500,
+    active_collection="test_v1",
+    index_version="test:v1",
+)
+
+DOC_TASK_PREFIX = CFG.doc_prefix
+QUERY_TASK_PREFIX = CFG.query_prefix
+EMBED_DIM = CFG.embed_dim
+
+
+def _make_fake_embedding(dim: int = EMBED_DIM) -> Any:
     """values 속성에 길이 dim의 float 리스트를 가진 객체를 반환한다."""
     obj = MagicMock()
     obj.values = [0.0] * dim
     return obj
 
 
-def _make_fake_response(n: int = 1, dim: int = config.EMBED_DIM) -> Any:
+def _make_fake_response(n: int = 1, dim: int = EMBED_DIM) -> Any:
     """n개의 가짜 ContentEmbedding을 담은 가짜 EmbedContentResponse."""
     resp = MagicMock()
     resp.embeddings = [_make_fake_embedding(dim) for _ in range(n)]
@@ -74,13 +98,14 @@ class TestPrefixes:
         import ingest.embedder as embedder
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        embedder.embed_documents(["발명 설명 텍스트"])
+        embedder.embed_documents(["발명 설명 텍스트"], CFG)
 
         call_args = fake_client.models.embed_content.call_args
         contents = call_args.kwargs["contents"]
         assert isinstance(contents, list)
-        assert contents[0].startswith(config.DOC_TASK_PREFIX), (
-            f"contents[0]이 DOC_TASK_PREFIX로 시작해야 함. 실제: {contents[0][:80]!r}"
+        text = contents[0].parts[0].text
+        assert text.startswith(DOC_TASK_PREFIX), (
+            f"문서 텍스트가 DOC_TASK_PREFIX로 시작해야 함. 실제: {text[:80]!r}"
         )
 
     def test_embed_query_uses_query_prefix(self, fake_client, monkeypatch):
@@ -89,11 +114,11 @@ class TestPrefixes:
         fake_client.models.embed_content.return_value = _make_fake_response(1)
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        embedder.embed_query("공기압 발전 아이디어")
+        embedder.embed_query("공기압 발전 아이디어", CFG)
 
         call_args = fake_client.models.embed_content.call_args
         contents = call_args.kwargs["contents"]
-        assert contents.startswith(config.QUERY_TASK_PREFIX), (
+        assert contents.startswith(QUERY_TASK_PREFIX), (
             f"contents가 QUERY_TASK_PREFIX로 시작해야 함. 실제: {contents[:80]!r}"
         )
 
@@ -102,10 +127,10 @@ class TestPrefixes:
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
         original = "원본 텍스트 내용"
-        embedder.embed_documents([original])
+        embedder.embed_documents([original], CFG)
 
         contents = fake_client.models.embed_content.call_args.kwargs["contents"]
-        assert original in contents[0]
+        assert original in contents[0].parts[0].text
 
     def test_embed_query_prefix_contains_original_text(self, fake_client, monkeypatch):
         import ingest.embedder as embedder
@@ -113,7 +138,7 @@ class TestPrefixes:
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
         original = "질의 텍스트"
-        embedder.embed_query(original)
+        embedder.embed_query(original, CFG)
 
         contents = fake_client.models.embed_content.call_args.kwargs["contents"]
         assert original in contents
@@ -130,25 +155,25 @@ class TestReturnShapes:
         fake_client.models.embed_content.return_value = _make_fake_response(n)
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        result = embedder.embed_documents(["a", "b", "c"])
+        result = embedder.embed_documents(["a", "b", "c"], CFG)
         assert len(result) == n
         for vec in result:
-            assert len(vec) == config.EMBED_DIM
+            assert len(vec) == EMBED_DIM
 
     def test_embed_query_returns_single_vector(self, fake_client, monkeypatch):
         import ingest.embedder as embedder
         fake_client.models.embed_content.return_value = _make_fake_response(1)
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        result = embedder.embed_query("질의")
+        result = embedder.embed_query("질의", CFG)
         assert isinstance(result, list)
-        assert len(result) == config.EMBED_DIM
+        assert len(result) == EMBED_DIM
 
     def test_embed_documents_empty_input_returns_empty(self, fake_client, monkeypatch):
         import ingest.embedder as embedder
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        result = embedder.embed_documents([])
+        result = embedder.embed_documents([], CFG)
         assert result == []
         fake_client.models.embed_content.assert_not_called()
 
@@ -174,7 +199,7 @@ class TestBatching:
 
         fake_client.models.embed_content.side_effect = side_effect
 
-        result = embedder.embed_documents(["text"] * n_texts)
+        result = embedder.embed_documents(["text"] * n_texts, CFG)
 
         assert fake_client.models.embed_content.call_count == expected_calls
         assert len(result) == n_texts
@@ -196,7 +221,7 @@ class TestBatching:
 
         fake_client.models.embed_content.side_effect = side_effect
 
-        result = embedder.embed_documents(texts)
+        result = embedder.embed_documents(texts, CFG)
 
         assert fake_client.models.embed_content.call_count == 2
         assert len(result) == 5
@@ -221,14 +246,14 @@ class TestBatching:
             for _ in range(n):
                 emb = MagicMock()
                 # 첫 번째 값에 전역 순서 번호를 저장 (0, 1, 2, 3, ...)
-                emb.values = [float(global_counter[0])] + [0.0] * (config.EMBED_DIM - 1)
+                emb.values = [float(global_counter[0])] + [0.0] * (EMBED_DIM - 1)
                 resp.embeddings.append(emb)
                 global_counter[0] += 1
             return resp
 
         fake_client.models.embed_content.side_effect = side_effect
 
-        result = embedder.embed_documents(["t0", "t1", "t2", "t3"])
+        result = embedder.embed_documents(["t0", "t1", "t2", "t3"], CFG)
 
         assert len(result) == 4
         # 순서 보존: result[i][0]는 정확히 float(i) 이어야 함
@@ -256,7 +281,7 @@ class TestApiKeyMissing:
         embedder._client = None
 
         with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
-            embedder.embed_documents(["텍스트"])
+            embedder.embed_documents(["텍스트"], CFG)
 
     def test_embed_query_raises_without_key(self, monkeypatch):
         import ingest.embedder as embedder
@@ -264,7 +289,7 @@ class TestApiKeyMissing:
         embedder._client = None
 
         with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
-            embedder.embed_query("질의")
+            embedder.embed_query("질의", CFG)
 
     def test_get_client_caches_after_key_set(self, monkeypatch):
         """키 설정 후 get_client()가 동일 객체를 반환하는지 확인."""
@@ -332,28 +357,126 @@ class TestEmbedConfig:
         import ingest.embedder as embedder
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        embedder.embed_documents(["텍스트"])
+        embedder.embed_documents(["텍스트"], CFG)
 
         call_kwargs = fake_client.models.embed_content.call_args.kwargs
         cfg = call_kwargs["config"]
-        assert cfg.output_dimensionality == config.EMBED_DIM
+        assert cfg.output_dimensionality == EMBED_DIM
 
     def test_embed_query_sets_output_dimensionality(self, fake_client, monkeypatch):
         import ingest.embedder as embedder
         fake_client.models.embed_content.return_value = _make_fake_response(1)
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        embedder.embed_query("질의")
+        embedder.embed_query("질의", CFG)
 
         call_kwargs = fake_client.models.embed_content.call_args.kwargs
         cfg = call_kwargs["config"]
-        assert cfg.output_dimensionality == config.EMBED_DIM
+        assert cfg.output_dimensionality == EMBED_DIM
 
     def test_embed_documents_uses_correct_model(self, fake_client, monkeypatch):
         import ingest.embedder as embedder
         monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
 
-        embedder.embed_documents(["텍스트"])
+        embedder.embed_documents(["텍스트"], CFG)
 
         call_kwargs = fake_client.models.embed_content.call_args.kwargs
         assert call_kwargs["model"] == config.EMBED_MODEL
+
+
+# ---------------------------------------------------------------------------
+# corpus별 설정이 실제로 반영되는지
+# ---------------------------------------------------------------------------
+
+class TestPerCorpusEmbedding:
+    """프리픽스와 차원은 전역 상수가 아니라 corpus 설정에서 온다."""
+
+    def test_different_corpora_use_their_own_prefix(self, fake_client, monkeypatch):
+        import ingest.embedder as embedder
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        other = CFG.with_updates(doc_prefix="[규정 문서] 학교 규정입니다.\n")
+        embedder.embed_documents(["본문"], other)
+
+        text = fake_client.models.embed_content.call_args.kwargs["contents"][0].parts[0].text
+        assert text.startswith("[규정 문서] 학교 규정입니다.")
+        assert not text.startswith(DOC_TASK_PREFIX)
+
+    def test_different_corpora_use_their_own_dimension(self, fake_client, monkeypatch):
+        import ingest.embedder as embedder
+        fake_client.models.embed_content.return_value = _make_fake_response(1, dim=768)
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        embedder.embed_query("질의", CFG.with_updates(embed_dim=768))
+
+        call_config = fake_client.models.embed_content.call_args.kwargs["config"]
+        assert call_config.output_dimensionality == 768
+
+
+# ---------------------------------------------------------------------------
+# 배치 임베딩 계약 — 실제 API 호출에서만 드러났던 회귀
+# ---------------------------------------------------------------------------
+
+class TestBatchContentsShape:
+    """문자열 리스트를 그대로 넘기면 SDK가 한 문서로 합쳐 벡터를 1개만 준다.
+
+    그 상태로 색인하면 청크와 벡터 개수가 어긋나거나 엉뚱한 벡터가 저장된다.
+    문서마다 별도 Content로 감싸는 것이 계약이다.
+    """
+
+    def test_each_text_becomes_its_own_content(self, fake_client, monkeypatch):
+        import ingest.embedder as embedder
+
+        fake_client.models.embed_content.return_value = _make_fake_response(3)
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        embedder.embed_documents(["문서1", "문서2", "문서3"], CFG)
+
+        contents = fake_client.models.embed_content.call_args.kwargs["contents"]
+        assert len(contents) == 3, "문서 3개는 Content 3개로 전달되어야 한다"
+        for item in contents:
+            # 문자열이 아니라 Content 객체여야 한다.
+            assert hasattr(item, "parts"), f"Content가 아님: {type(item)}"
+            assert len(item.parts) == 1
+
+    def test_prefix_is_inside_the_content(self, fake_client, monkeypatch):
+        import ingest.embedder as embedder
+
+        fake_client.models.embed_content.return_value = _make_fake_response(1)
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        embedder.embed_documents(["본문 내용"], CFG)
+
+        content = fake_client.models.embed_content.call_args.kwargs["contents"][0]
+        assert content.parts[0].text.startswith(DOC_TASK_PREFIX)
+        assert "본문 내용" in content.parts[0].text
+
+    def test_count_mismatch_raises_instead_of_silently_misaligning(
+        self, fake_client, monkeypatch
+    ):
+        """개수가 어긋난 채 진행하면 청크와 벡터가 밀려 엉뚱한 문서가 검색된다."""
+        import ingest.embedder as embedder
+
+        # 3개를 요청했는데 1개만 돌아오는 상황 (실제로 겪은 증상)
+        fake_client.models.embed_content.return_value = _make_fake_response(1)
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        with pytest.raises(embedder.EmbeddingUnavailable, match="개수"):
+            embedder.embed_documents(["문서1", "문서2", "문서3"], CFG)
+
+    def test_batches_are_split_by_configured_size(self, fake_client, monkeypatch):
+        import config as config_module
+        import ingest.embedder as embedder
+
+        monkeypatch.setattr(config_module, "EMBED_BATCH_SIZE", 2)
+        fake_client.models.embed_content.side_effect = [
+            _make_fake_response(2),
+            _make_fake_response(2),
+            _make_fake_response(1),
+        ]
+        monkeypatch.setattr(embedder, "get_client", lambda: fake_client)
+
+        result = embedder.embed_documents([f"문서{i}" for i in range(5)], CFG)
+
+        assert len(result) == 5
+        assert fake_client.models.embed_content.call_count == 3

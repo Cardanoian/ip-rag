@@ -1,8 +1,10 @@
-# Vector store (rebuilt from docs/ via ingest.build_index)
+# 영속 데이터 볼륨 (벡터, 업로드 문서, 운영 DB)
+data/
 chroma_db/
 
 # Secrets
 .env
+.env.backup*
 
 # Python
 __pycache__/

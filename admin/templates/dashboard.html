@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}대시보드{% endblock %}
+{% block content %}
+<h1>대시보드</h1>
+<p class="subtitle">corpus별 색인 현황과 최근 작업입니다.</p>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>corpus</th><th>종류</th><th>상태</th>
+        <th class="num">문서</th><th class="num">청크</th>
+        <th>활성 컬렉션</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in overview %}
+      <tr>
+        <td>
+          <a href="/admin/corpora/{{ row.cfg.id }}"><strong>{{ row.cfg.label }}</strong></a>
+          <div class="mono muted">{{ row.cfg.id }}</div>
+        </td>
+        <td>{{ row.cfg.kind }}</td>
+        <td>
+          <span class="status status-{{ row.cfg.status }}">
+            {% if row.cfg.status == 'published' %}공개
+            {% elif row.cfg.status == 'draft' %}초안
+            {% else %}비공개{% endif %}
+          </span>
+          {% if row.cfg.needs_rebuild %}
+            <div class="hint" style="color:var(--warning)">재색인 필요</div>
+          {% endif %}
+        </td>
+        <td class="num">{{ row.documents }}</td>
+        <td class="num">{{ row.chunks }}</td>
+        <td class="mono">{{ row.cfg.active_collection }}</td>
+        <td>
+          {% if row.active_job %}
+            <span class="muted">작업 #{{ row.active_job.id }} 진행 중</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>최근 색인 작업</h2>
+<div class="card">
+  {% if recent_jobs %}
+  <table>
+    <thead>
+      <tr><th>#</th><th>corpus</th><th>종류</th><th>상태</th><th>실행자</th><th>시각</th></tr>
+    </thead>
+    <tbody>
+    {% for job in recent_jobs %}
+      <tr>
+        <td>{{ job.id }}</td>
+        <td class="mono">{{ job.corpus_id }}</td>
+        <td>{{ "전체 재색인" if job.kind == "rebuild" else "변경분 색인" }}</td>
+        <td>
+          {{ job.status }}
+          {% if job.error %}<div class="hint" style="color:var(--danger)">{{ job.error }}</div>{% endif %}
+        </td>
+        <td>{{ job.created_by or "-" }}</td>
+        <td class="mono muted">{{ job.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">아직 실행된 색인 작업이 없습니다.</div>
+  {% endif %}
+</div>
+{% endblock %}

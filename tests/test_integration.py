@@ -39,8 +39,11 @@ from pathlib import Path
 import pytest
 
 import config
+import corpora
 import ingest.store as store
 from ingest.build_index import build_index
+from ingest.parse import ADVISOR_DOC_TYPE, MAIN_DOC_TYPE
+from ingest.rebuild import rebuild_corpus
 from ingest.search import search
 
 
@@ -48,9 +51,8 @@ from ingest.search import search
 # Fake embedding
 # ---------------------------------------------------------------------------
 
-def _fake_embed_one(text: str) -> list[float]:
+def _fake_embed_one(text: str, dim: int = 1536) -> list[float]:
     """Char-frequency bucket embedding, L2-normalised."""
-    dim = config.EMBED_DIM
     vec = [0.0] * dim
     for ch in text:
         vec[ord(ch) % dim] += 1.0
@@ -61,26 +63,17 @@ def _fake_embed_one(text: str) -> list[float]:
     return [x / norm for x in vec]
 
 
-def _fake_embed_documents(texts: list[str]) -> list[list[float]]:
-    return [_fake_embed_one(t) for t in texts]
+def _fake_embed_documents(texts: list[str], cfg) -> list[list[float]]:
+    return [_fake_embed_one(t, cfg.embed_dim) for t in texts]
 
 
-def _fake_embed_query(text: str) -> list[float]:
-    return _fake_embed_one(text)
+def _fake_embed_query(text: str, cfg) -> list[float]:
+    return _fake_embed_one(text, cfg.embed_dim)
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def isolate_chroma(tmp_path, monkeypatch):
-    """Point config.CHROMA_PATH at a fresh tmp dir and reset store cache."""
-    monkeypatch.setattr(config, "CHROMA_PATH", tmp_path / "chroma")
-    store.reset_cache()
-    yield
-    store.reset_cache()
-
 
 @pytest.fixture()
 def patch_embedders(monkeypatch):
@@ -92,10 +85,9 @@ def patch_embedders(monkeypatch):
 
 
 @pytest.fixture()
-def docs_dir(tmp_path) -> Path:
-    d = tmp_path / "docs"
-    d.mkdir()
-    return d
+def cfg(seed_corpus):
+    """시드 발명 corpus. 경로 격리는 conftest가 처리한다."""
+    return seed_corpus
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +152,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def built_index(docs_dir, patch_embedders):
+def built_index(cfg, docs_dir, patch_embedders):
     """Write test docs, build the index, return (docs_dir, stats)."""
     _write(docs_dir, "1999-생활과학Ⅰ-홍길동-자동 우산 건조기-.md", BODY_USAN)
     _write(docs_dir, "2001-과학완구-김철수-빛나는 팽이-.md", BODY_PAENGI)
@@ -168,7 +160,7 @@ def built_index(docs_dir, patch_embedders):
     _write(docs_dir, "2003-교육연구-박지도-발명 지도 방법론 연구(지도논문)-.md", BODY_ADVISOR)
     _write(docs_dir, "2010-과학완구-공백-빈파일-.md", "")  # 0-byte → skipped
 
-    stats = build_index(docs_dir=docs_dir, reset=True)
+    stats = build_index(cfg, docs_dir=docs_dir, reset=True)
     return docs_dir, stats
 
 
@@ -177,31 +169,31 @@ def built_index(docs_dir, patch_embedders):
 # ---------------------------------------------------------------------------
 
 class TestIndexingStats:
-    def test_valid_docs_are_indexed(self, built_index):
+    def test_valid_docs_are_indexed(self, cfg, built_index):
         """build_index returns indexed_docs=4 (3 main + 1 advisor)."""
         _, stats = built_index
         assert stats["indexed_docs"] == 4
 
-    def test_zero_byte_file_is_skipped(self, built_index):
+    def test_zero_byte_file_is_skipped(self, cfg, built_index):
         """build_index skips the 0-byte file."""
         _, stats = built_index
         assert stats["skipped_docs"] == 1
 
-    def test_no_failures(self, built_index):
+    def test_no_failures(self, cfg, built_index):
         """No documents should fail processing."""
         _, stats = built_index
         assert stats["failed_docs"] == 0
 
-    def test_chunks_were_embedded(self, built_index):
+    def test_chunks_were_embedded(self, cfg, built_index):
         """Embedded chunks equals total chunks (fresh build, no reuse)."""
         _, stats = built_index
         assert stats["total_chunks"] > 0
         assert stats["embedded_chunks"] == stats["total_chunks"]
 
-    def test_chroma_contains_all_chunks(self, built_index):
+    def test_chroma_contains_all_chunks(self, cfg, built_index):
         """ChromaDB collection count matches reported total_chunks."""
         _, stats = built_index
-        col = store.get_collection()
+        col = store.get_collection(cfg.active_collection)
         assert col.count() == stats["total_chunks"]
 
 
@@ -210,39 +202,39 @@ class TestIndexingStats:
 # ---------------------------------------------------------------------------
 
 class TestSelfRecall:
-    def test_usan_doc_is_top_result_for_its_own_body(self, built_index):
+    def test_usan_doc_is_top_result_for_its_own_body(self, cfg, built_index):
         """Query with 우산 body text → 우산 document is result[0]."""
-        results = search(BODY_USAN, top_k=3)
+        results = search(cfg, BODY_USAN, top_k=3)
         assert len(results) >= 1, "Expected at least one result"
         assert "우산" in results[0]["title"] or "우산" in results[0]["snippet"], (
             f"Expected 우산 doc as top result, got: {results[0]}"
         )
 
-    def test_usan_self_recall_similarity_is_high(self, built_index):
+    def test_usan_self_recall_similarity_is_high(self, cfg, built_index):
         """Self-recall similarity for 우산 query should be near 1.0."""
-        results = search(BODY_USAN, top_k=3)
+        results = search(cfg, BODY_USAN, top_k=3)
         assert results[0]["similarity"] >= 0.90, (
             f"Self-recall similarity too low: {results[0]['similarity']}"
         )
 
-    def test_paengi_doc_is_top_result_for_its_own_body(self, built_index):
+    def test_paengi_doc_is_top_result_for_its_own_body(self, cfg, built_index):
         """Query with 팽이 body text → 팽이 document is result[0]."""
-        results = search(BODY_PAENGI, top_k=3)
+        results = search(cfg, BODY_PAENGI, top_k=3)
         assert len(results) >= 1
         assert "팽이" in results[0]["title"] or "팽이" in results[0]["snippet"], (
             f"Expected 팽이 doc as top result, got: {results[0]}"
         )
 
-    def test_paengi_self_recall_similarity_is_high(self, built_index):
+    def test_paengi_self_recall_similarity_is_high(self, cfg, built_index):
         """Self-recall similarity for 팽이 query should be near 1.0."""
-        results = search(BODY_PAENGI, top_k=3)
+        results = search(cfg, BODY_PAENGI, top_k=3)
         assert results[0]["similarity"] >= 0.90, (
             f"Self-recall similarity too low: {results[0]['similarity']}"
         )
 
-    def test_doksodae_doc_is_top_result_for_its_own_body(self, built_index):
+    def test_doksodae_doc_is_top_result_for_its_own_body(self, cfg, built_index):
         """Query with 독서대 body text → 독서대 document is result[0]."""
-        results = search(BODY_DOKSODAE, top_k=3)
+        results = search(cfg, BODY_DOKSODAE, top_k=3)
         assert len(results) >= 1
         assert "독서대" in results[0]["title"] or "독서대" in results[0]["snippet"], (
             f"Expected 독서대 doc as top result, got: {results[0]}"
@@ -254,19 +246,19 @@ class TestSelfRecall:
 # ---------------------------------------------------------------------------
 
 class TestAdvisorFiltering:
-    def test_advisor_doc_excluded_by_default(self, built_index):
+    def test_advisor_doc_excluded_by_default(self, cfg, built_index):
         """search() with default include_advisor_docs=False excludes 지도논문."""
-        results = search(BODY_ADVISOR, top_k=5, include_advisor_docs=False)
-        doc_types = {r["doc_type"] for r in results}
-        assert config.ADVISOR_DOC_TYPE not in doc_types, (
+        results = search(cfg, BODY_ADVISOR, top_k=5, options={"include_advisor_docs": False})
+        doc_types = {r["metadata"]["doc_type"] for r in results}
+        assert ADVISOR_DOC_TYPE not in doc_types, (
             f"지도논문 should be filtered out, but found in results: {results}"
         )
 
-    def test_advisor_doc_included_when_flag_is_true(self, built_index):
+    def test_advisor_doc_included_when_flag_is_true(self, cfg, built_index):
         """search() with include_advisor_docs=True can return 지도논문."""
-        results = search(BODY_ADVISOR, top_k=5, include_advisor_docs=True)
-        doc_types = {r["doc_type"] for r in results}
-        assert config.ADVISOR_DOC_TYPE in doc_types, (
+        results = search(cfg, BODY_ADVISOR, top_k=5, options={"include_advisor_docs": True})
+        doc_types = {r["metadata"]["doc_type"] for r in results}
+        assert ADVISOR_DOC_TYPE in doc_types, (
             f"지도논문 should appear when include_advisor_docs=True, got: {results}"
         )
 
@@ -276,31 +268,36 @@ class TestAdvisorFiltering:
 # ---------------------------------------------------------------------------
 
 class TestAggregationSanity:
-    def test_results_are_distinct_source_paths(self, built_index):
+    def test_results_are_distinct_source_paths(self, cfg, built_index):
         """No duplicate source_path in results."""
-        results = search(BODY_USAN, top_k=5)
+        results = search(cfg, BODY_USAN, top_k=5)
         source_paths = [r["source_path"] for r in results]
         assert len(source_paths) == len(set(source_paths)), (
             f"Duplicate source_paths found: {source_paths}"
         )
 
-    def test_results_sorted_by_similarity_descending(self, built_index):
+    def test_results_sorted_by_similarity_descending(self, cfg, built_index):
         """Results are in similarity descending order."""
-        results = search(BODY_USAN, top_k=5)
+        results = search(cfg, BODY_USAN, top_k=5)
         sims = [r["similarity"] for r in results]
         assert sims == sorted(sims, reverse=True), (
             f"Results not sorted by similarity desc: {sims}"
         )
 
-    def test_result_dict_has_required_keys(self, built_index):
-        """Each result dict has the seven documented keys plus snippet."""
-        results = search(BODY_USAN, top_k=3)
-        required = {"title", "year", "category", "author", "doc_type",
-                    "source_path", "similarity", "snippet"}
+    def test_result_dict_has_required_keys(self, cfg, built_index):
+        """결과 dict는 corpus 공통 키를 갖고, corpus별 필드는 metadata에 담긴다."""
+        results = search(cfg, BODY_USAN, top_k=3)
+        required = {
+            "document_id", "title", "source_path", "similarity",
+            "snippet", "metadata", "_raw_metadata",
+        }
         for r in results:
             assert set(r.keys()) == required, (
                 f"Result missing keys. Got: {set(r.keys())}, expected: {required}"
             )
+            # 발명 corpus의 공개 메타는 저자를 빼고 노출된다.
+            assert set(r["metadata"]) <= {"title", "year", "category", "doc_type"}
+            assert "author" not in r["metadata"]
 
     def test_self_beats_others_cosine_sanity(self):
         """Unit-level sanity: fake_embed gives higher cosine for self than cross-doc."""

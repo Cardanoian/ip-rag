@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}새 corpus{% endblock %}
+{% block content %}
+<h1>새 corpus 만들기</h1>
+<p class="subtitle">
+  만든 직후에는 초안 상태입니다. 문서를 올리고 색인한 뒤 공개해야 검색 API에 노출됩니다.
+</p>
+
+<form method="post" action="/admin/corpora/new">
+  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+
+  <div class="card">
+    <h2 style="margin-top:0">기본 정보</h2>
+    <div class="grid2">
+      <div class="field">
+        <label for="corpus_slug">corpus 주소</label>
+        <input id="corpus_slug" name="corpus_slug" type="text" required
+               value="{{ form.corpus_slug or '' }}" placeholder="school-violence">
+        <div class="hint">
+          영문 소문자·숫자·하이픈. API 경로와 폴더 이름으로 쓰이며 나중에 바꿀 수 없습니다.
+        </div>
+      </div>
+      <div class="field">
+        <label for="label">이름</label>
+        <input id="label" name="label" type="text" required
+               value="{{ form.label or '' }}" placeholder="학교폭력 관련 규정">
+        <div class="hint">관리 화면에 표시되는 이름입니다.</div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="kind">종류</label>
+      <select id="kind" name="kind">
+        {% for k in kinds %}
+          <option value="{{ k.name }}" {% if form.kind == k.name %}selected{% endif %}>
+            {{ k.label }} ({{ k.file_extensions | join(", ") }})
+          </option>
+        {% endfor %}
+      </select>
+      {% for k in kinds %}<div class="hint">{{ k.description }}</div>{% endfor %}
+    </div>
+
+    <div class="field">
+      <label for="corpus_id">데이터셋 식별자</label>
+      <input id="corpus_id" name="corpus_id" type="text"
+             value="{{ form.corpus_id or '' }}" placeholder="비우면 corpus 주소를 그대로 씁니다">
+      <div class="hint">검색 응답에 함께 실려 출처를 구분하는 값입니다.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">임베딩 지시문</h2>
+    <p class="hint" style="margin-top:0">
+      이 모델은 문서와 질의에 서로 다른 안내 문장을 붙여 검색 품질을 높입니다.
+      자료의 성격을 한 문장으로 설명해 주세요.
+    </p>
+    <div class="field">
+      <label for="doc_prefix">문서 지시문</label>
+      <textarea id="doc_prefix" name="doc_prefix" required
+        placeholder="[검색 대상 문서] 다음은 학교폭력 예방 관련 규정과 지침입니다.">{{ form.doc_prefix or '' }}</textarea>
+    </div>
+    <div class="field">
+      <label for="query_prefix">질의 지시문</label>
+      <textarea id="query_prefix" name="query_prefix" required
+        placeholder="[검색 질의] 다음 상황과 관련된 규정을 찾습니다.">{{ form.query_prefix or '' }}</textarea>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">색인 설정</h2>
+    <p class="hint" style="margin-top:0">
+      기본값으로 두어도 됩니다. 나중에 바꾸면 전체 재색인이 필요합니다.
+    </p>
+    <div class="grid2">
+      <div class="field">
+        <label for="embed_dim">임베딩 차원</label>
+        <input id="embed_dim" name="embed_dim" type="number" min="128" max="3072"
+               value="{{ form.embed_dim or 1536 }}">
+      </div>
+      <div class="field">
+        <label for="chunk_size">청크 크기(자)</label>
+        <input id="chunk_size" name="chunk_size" type="number" min="100"
+               value="{{ form.chunk_size or 1000 }}">
+      </div>
+      <div class="field">
+        <label for="chunk_overlap">청크 겹침(자)</label>
+        <input id="chunk_overlap" name="chunk_overlap" type="number" min="0"
+               value="{{ form.chunk_overlap or 150 }}">
+      </div>
+      <div class="field">
+        <label for="single_chunk_char_hint">단일 청크 한도(자)</label>
+        <input id="single_chunk_char_hint" name="single_chunk_char_hint" type="number" min="100"
+               value="{{ form.single_chunk_char_hint or 5500 }}">
+        <div class="hint">이보다 짧은 문서는 나누지 않고 통째로 색인합니다.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button type="submit" class="primary">corpus 만들기</button>
+    <a class="btn" href="/admin/">취소</a>
+  </div>
+</form>
+{% endblock %}

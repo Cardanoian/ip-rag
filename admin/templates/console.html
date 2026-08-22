@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }} 검색 테스트{% endblock %}
+{% block content %}
+<h1>검색 테스트</h1>
+<p class="subtitle">
+  {{ cfg.label }} (<span class="mono">{{ cfg.id }}</span>) ·
+  공개 전 corpus도 여기서는 검색해 색인 품질을 확인할 수 있습니다.
+</p>
+
+<div class="card">
+  <form method="post" action="/admin/corpora/{{ cfg.id }}/console">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="query">질의</label>
+      <textarea id="query" name="query" required
+                placeholder="찾고 싶은 내용을 문장으로 적어 주세요">{{ query }}</textarea>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label for="top_k">결과 수</label>
+        <input id="top_k" name="top_k" type="number" min="1" max="50" value="{{ top_k or 5 }}">
+      </div>
+      {% if cfg.kind == 'invention' %}
+      <div class="field">
+        <label>
+          <input type="checkbox" name="include_advisor_docs" value="true" style="width:auto">
+          지도논문 포함
+        </label>
+      </div>
+      {% endif %}
+    </div>
+    <button type="submit" class="primary">검색</button>
+  </form>
+</div>
+
+{% if results is not none %}
+<h2>결과 {{ results | length }}건</h2>
+<div class="card">
+  {% if results %}
+  <table>
+    <thead>
+      <tr><th class="num" style="width:70px">유사도</th><th>제목</th><th>발췌</th></tr>
+    </thead>
+    <tbody>
+    {% for item in results %}
+      <tr>
+        <td class="num"><strong>{{ "%.3f" | format(item.similarity) }}</strong></td>
+        <td>
+          {{ item.title }}
+          <div class="mono muted">{{ item.source_path }}</div>
+          {% if item.metadata %}
+            <div class="hint">
+              {% for key, value in item.metadata.items() %}
+                {% if key != 'title' and value %}{{ key }}: {{ value }}{% if not loop.last %} · {% endif %}{% endif %}
+              {% endfor %}
+            </div>
+          {% endif %}
+        </td>
+        <td class="muted">{{ item.snippet }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">일치하는 자료가 없습니다.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+<p><a href="/admin/corpora/{{ cfg.id }}">← {{ cfg.label }}로 돌아가기</a></p>
+{% endblock %}
