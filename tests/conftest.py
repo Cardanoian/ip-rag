@@ -35,7 +35,6 @@ def isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DOCS_ROOT", data_dir / "docs")
     monkeypatch.setattr(config, "APP_DB_PATH", data_dir / "app.db")
     monkeypatch.setattr(config, "CHROMA_PATH", data_dir / "chroma_db")
-    monkeypatch.setattr(config, "INVENTIONS_DOCS_DIR", None)
 
     # api/auth.py 는 os.environ을, config.is_production()은 모듈 상수를 본다.
     monkeypatch.setenv("APP_ENV", "development")

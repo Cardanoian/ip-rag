@@ -21,4 +21,3 @@ venv/
 
 # OMC tooling state (local only; plan lives in .omc/plans/)
 .omc/
-docs/

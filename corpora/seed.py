@@ -49,7 +49,6 @@ def seed_config(now: str) -> CorpusConfig:
         ),
         status=STATUS_PUBLISHED,
         is_seed=True,
-        docs_dir_override=config.INVENTIONS_DOCS_DIR,
         created_at=now,
         created_by=None,
         updated_at=now,

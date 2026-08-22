@@ -1,11 +1,12 @@
-"""기존 repo의 docs/ 를 corpus 문서 디렉터리로 옮긴다.
+"""외부 디렉터리의 문서를 corpus 문서 디렉터리로 가져온다.
 
-멀티 corpus 이전에는 문서가 repo 안 `docs/` 에 있었다. 이제는 corpus별로
-`DOCS_ROOT/{corpus_id}/` 아래에 두고 영속 볼륨으로 관리한다.
+문서는 저장소가 아니라 `DOCS_ROOT/{corpus_id}/` 아래에서 관리한다. 보통은
+어드민 화면에서 업로드하지만, 수천 개를 한 번에 넣을 때는 브라우저보다
+이 스크립트가 편하다.
 
-    python -m scripts.migrate_docs --corpus inventions --source docs
-    python -m scripts.migrate_docs --corpus inventions --mode symlink
-    python -m scripts.migrate_docs --corpus inventions --dry-run
+    python -m scripts.migrate_docs --corpus inventions --source /경로/문서모음
+    python -m scripts.migrate_docs --corpus inventions --source /경로 --dry-run
+    python -m scripts.migrate_docs --corpus inventions --source /경로 --mode symlink
 
 symlink 모드는 파일을 복사하지 않고 corpus 디렉터리 자체를 원본으로 연결한다.
 디스크가 빠듯하거나 원본을 그대로 두고 싶을 때 쓴다. 컨테이너 배포에서는
@@ -98,8 +99,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--source",
         type=Path,
-        default=config.PROJECT_ROOT / "docs",
-        help="원본 디렉터리 (기본: <프로젝트>/docs)",
+        required=True,
+        help="가져올 문서가 들어 있는 디렉터리",
     )
     parser.add_argument(
         "--mode",

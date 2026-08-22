@@ -1,2 +1,2 @@
-# Store the document corpus via Git LFS (D5 decision)
-docs/**/*.md filter=lfs diff=lfs merge=lfs -text
+# 문서 corpus는 저장소가 아니라 DATA_DIR 볼륨에서 관리한다.
+# 저장소에 대용량 파일이 없으므로 Git LFS 설정이 필요 없다.

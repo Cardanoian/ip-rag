@@ -8,6 +8,9 @@ corpus별 설정(컬렉션명, 임베딩 지시문, 청킹 파라미터, 차원)
   RAG_API_TOKEN  : Rails → RAG 서비스 인증용 공유 토큰 (production 필수)
   SESSION_SECRET : 어드민 세션 쿠키 서명 키 (production 필수)
   DATA_DIR       : 문서·벡터·메타 DB를 담는 영속 볼륨 (기본 ./data)
+
+문서는 저장소가 아니라 DATA_DIR 아래에만 존재한다. 관리자가 어드민 화면에서
+올리거나 scripts.migrate_docs 로 외부 디렉터리에서 가져온다.
 """
 from __future__ import annotations
 
@@ -27,9 +30,6 @@ DOCS_ROOT = Path(os.getenv("DOCS_ROOT", str(DATA_DIR / "docs")))
 # corpora 정의, 관리자 계정, 색인 잡, 감사 로그를 담는 운영 DB
 APP_DB_PATH = Path(os.getenv("APP_DB_PATH", str(DATA_DIR / "app.db")))
 CHROMA_PATH = Path(os.getenv("CHROMA_PATH", str(DATA_DIR / "chroma_db")))
-
-# 기존 배포 호환: 시드 corpus의 문서 디렉터리를 옛 경로로 고정할 수 있다.
-INVENTIONS_DOCS_DIR = os.getenv("INVENTIONS_DOCS_DIR") or None
 
 # --- 임베딩 (Gemini gemini-embedding-2) ---
 EMBED_MODEL = "gemini-embedding-2"

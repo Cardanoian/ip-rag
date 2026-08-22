@@ -220,9 +220,9 @@ def delete_documents(cfg, filenames: list[str]) -> tuple[list[str], list[str]]:
 def delete_all_documents(cfg) -> int:
     """corpus 디렉터리를 통째로 비운다. corpus 완전삭제에서만 쓴다.
 
-    재귀 삭제라 경로가 어긋나면 피해가 크다. INVENTIONS_DOCS_DIR 같은 override로
-    corpus 문서 경로가 데이터 루트 밖(예: repo의 원본 docs/)을 가리킬 수 있으므로,
-    지우기 전에 DOCS_ROOT 안에 있는지 반드시 확인한다.
+    재귀 삭제라 경로가 어긋나면 피해가 크다. docs_dir_override 로 corpus 문서
+    경로가 데이터 루트 밖을 가리킬 수 있으므로, 지우기 전에 DOCS_ROOT 안에
+    있는지 반드시 확인한다.
     """
     import shutil
 

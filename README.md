@@ -105,34 +105,19 @@ FastAPI는 검색과 자료 관리만 담당합니다. 학생 계정, 프로젝�
 ### 요구사항
 
 - Python 3.11 이상
-- **Git LFS** — 문서 본문이 LFS로 저장되어 있습니다
 
 ~~~bash
 git clone <repo-url>
 cd ip-rag
-git lfs install
-git lfs pull          # 이 단계를 빠뜨리면 안 됩니다 (아래 설명)
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
 ~~~
 
-> **`git lfs pull`을 하지 않으면** 문서 파일에 본문 대신 아래 같은 포인터
-> 텍스트가 들어 있습니다.
->
-> ~~~text
-> version https://git-lfs.github.com/spec/v1
-> oid sha256:e8334a...
-> size 4096
-> ~~~
->
-> 색인기는 이런 파일을 감지해 **색인하지 않고** `lfs_pointer_docs` 로 세어
-> 로그와 어드민 화면에 경고를 띄웁니다. 이 방어가 없으면 제목만으로 검색이
-> 되는 것처럼 보여서 품질이 망가진 걸 알아채기 어렵습니다.
->
-> `git lfs` 명령이 없다면 먼저 설치하세요.
-> Debian/Ubuntu: `sudo apt install git-lfs`, macOS: `brew install git-lfs`
+**이 저장소에는 문서가 들어 있지 않습니다.** 코드만 담고, 검색 대상 문서는
+`DATA_DIR` 볼륨에서 관리합니다. 관리자가 어드민 화면에서 올리거나
+[대량 문서 가져오기](#대량-문서-가져오기)를 씁니다.
 
 개발용 .env 예:
 
@@ -164,20 +149,21 @@ data/
 └── app.db            corpus 정의, 관리자 계정, 색인 잡, 감사 로그
 ~~~
 
-### 기존 문서 이관
+### 대량 문서 가져오기
 
-멀티 corpus 이전에는 문서가 repo의 `docs/`에 있었습니다. corpus 디렉터리로
-옮깁니다.
+문서는 보통 어드민 화면에서 올립니다. 다만 수천 개를 한 번에 넣을 때는
+브라우저 업로드보다 이 스크립트가 편합니다.
 
 ~~~bash
-python -m scripts.migrate_docs --corpus inventions --dry-run
-python -m scripts.migrate_docs --corpus inventions
+python -m scripts.migrate_docs --corpus inventions --source /경로/문서모음 --dry-run
+python -m scripts.migrate_docs --corpus inventions --source /경로/문서모음
 ~~~
 
 `--mode symlink`를 쓰면 복사 대신 원본을 연결합니다. 컨테이너 배포에서는
 볼륨 안에 실제 파일이 있어야 하므로 기본값인 copy를 권합니다.
-원본 경로를 그대로 쓰고 싶다면 `INVENTIONS_DOCS_DIR` 환경변수로 지정할 수도
-있습니다.
+
+가져온 뒤에는 색인을 해야 검색됩니다. 어드민의 **변경분 색인**을 쓰거나
+아래 CLI를 실행하세요.
 
 ## Rails Credentials 연동
 
@@ -379,26 +365,21 @@ docker build -t ip-rag .
 docker volume create ip-rag-data
 ~~~
 
-문서를 볼륨에 넣고 색인합니다.
-
-~~~bash
-docker run --rm \
-  -e GEMINI_API_KEY=... \
-  -v "$PWD/docs:/mnt/source:ro" \
-  -v ip-rag-data:/data \
-  ip-rag python -m scripts.migrate_docs --corpus inventions --source /mnt/source
-
-docker run --rm \
-  -e GEMINI_API_KEY=... \
-  -v ip-rag-data:/data \
-  ip-rag python -m ingest.build_index --corpus inventions
-~~~
-
 초기 관리자 계정을 만듭니다.
 
 ~~~bash
 docker run --rm -it -v ip-rag-data:/data ip-rag \
   python -m admin.cli create-user boss
+~~~
+
+문서는 서버를 띄운 뒤 어드민 화면에서 올립니다. 대량으로 넣어야 하면
+원본 디렉터리를 마운트해 스크립트를 씁니다.
+
+~~~bash
+docker run --rm \
+  -v "/경로/문서모음:/mnt/source:ro" \
+  -v ip-rag-data:/data \
+  ip-rag python -m scripts.migrate_docs --corpus inventions --source /mnt/source
 ~~~
 
 API 실행:
