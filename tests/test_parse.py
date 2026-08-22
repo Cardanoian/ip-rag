@@ -6,8 +6,22 @@ from pathlib import Path
 
 import pytest
 
-from config import ADVISOR_DOC_TYPE, MAIN_DOC_TYPE, MIN_DOC_CHARS
-from ingest.parse import load_document, normalize_nfc, parse_filename
+from config import MIN_DOC_CHARS
+from corpora.kinds import InventionKind
+from ingest.parse import (
+    ADVISOR_DOC_TYPE,
+    MAIN_DOC_TYPE,
+    normalize_nfc,
+    parse_filename,
+    read_source,
+)
+
+_invention = InventionKind()
+
+
+def load_document(path):
+    """발명 kind의 로더 — 예전 load_document()와 같은 dict를 돌려준다."""
+    return _invention.load(path, "inventions")
 
 
 # ---------------------------------------------------------------------------
@@ -126,5 +140,66 @@ def test_load_document_normal_file(tmp_path):
     expected_hash = hashlib.sha256(expected_body.encode("utf-8")).hexdigest()
     assert result["content_hash"] == expected_hash
 
-    # source_path should be a POSIX path string
-    assert "/" in result["source_path"] or result["source_path"].endswith(".md")
+    # source_path는 corpus 내부 경로다 — 서버의 절대 경로가 새면 안 된다.
+    assert result["source_path"] == "inventions/2005-학습용품-이발명-멋진발명품-.md"
+    assert str(tmp_path) not in result["source_path"]
+
+
+# ---------------------------------------------------------------------------
+# read_source — corpus 중립 공통부
+# ---------------------------------------------------------------------------
+
+def test_read_source_prefixes_corpus_id(tmp_path):
+    """source_path는 어떤 corpus의 문서인지로 식별된다."""
+    f = tmp_path / "규정 안내.md"
+    f.write_text("학교 규정 본문입니다.\n" * 10, encoding="utf-8")
+
+    result = read_source(f, "rules")
+    assert result is not None
+    assert result["source_path"] == "rules/규정 안내.md"
+    assert result["stem"] == "규정 안내"
+    assert result["filename"] == "규정 안내.md"
+
+
+def test_read_source_missing_file_returns_none(tmp_path):
+    assert read_source(tmp_path / "없는파일.md", "rules") is None
+
+
+# ---------------------------------------------------------------------------
+# Git LFS 포인터 방어
+# ---------------------------------------------------------------------------
+
+LFS_POINTER = (
+    "version https://git-lfs.github.com/spec/v1\n"
+    "oid sha256:e8334a1c9f2b7d6e5a4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5\n"
+    "size 4096\n"
+)
+
+
+def test_lfs_pointer_is_detected(tmp_path):
+    """`git lfs pull` 없이 읽으면 본문 대신 포인터가 들어온다.
+
+    길이가 MIN_DOC_CHARS를 넘어 그냥 두면 조용히 색인되고, 검색은 제목만으로
+    매칭되어 품질이 망가진 것을 알아채기 어렵다.
+    """
+    from ingest.parse import LFSPointerError
+
+    path = tmp_path / "1979-과학완구-홍길동-발명품-.md"
+    path.write_text(LFS_POINTER, encoding="utf-8")
+
+    with pytest.raises(LFSPointerError, match="git lfs pull"):
+        read_source(path, "inventions")
+
+
+def test_lfs_pointer_is_longer_than_min_doc_chars():
+    """이 방어가 필요한 이유 자체를 고정한다 — 길이 검사로는 못 걸러낸다."""
+    assert len(LFS_POINTER.strip()) > MIN_DOC_CHARS
+
+
+def test_normal_document_is_not_mistaken_for_pointer(tmp_path):
+    path = tmp_path / "규정.md"
+    path.write_text("version 관리 규정에 대한 문서입니다.\n" * 5, encoding="utf-8")
+
+    result = read_source(path, "rules")
+
+    assert result is not None

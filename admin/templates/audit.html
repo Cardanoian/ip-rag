@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}감사 로그{% endblock %}
+{% block content %}
+<h1>감사 로그</h1>
+<p class="subtitle">계정 변경, corpus 관리, 색인 작업 기록입니다. 최근 300건을 보여줍니다.</p>
+
+<div class="card">
+  {% if entries %}
+  <table>
+    <thead><tr><th>시각</th><th>실행자</th><th>작업</th><th>대상</th><th>상세</th></tr></thead>
+    <tbody>
+    {% for entry in entries %}
+      <tr>
+        <td class="mono muted">{{ entry.created_at }}</td>
+        <td>{{ entry.actor or "-" }}</td>
+        <td class="mono">{{ entry.action }}</td>
+        <td class="mono">{{ entry.target or "-" }}</td>
+        <td class="muted">
+          {% for key, value in entry.detail.items() %}
+            {{ key }}={{ value }}{% if not loop.last %} · {% endif %}
+          {% endfor %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">기록이 없습니다.</div>
+  {% endif %}
+</div>
+{% endblock %}

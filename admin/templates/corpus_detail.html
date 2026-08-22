@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }}{% endblock %}
+{% block content %}
+<h1>
+  {{ cfg.label }}
+  <span class="status status-{{ cfg.status }}">
+    {% if cfg.status == 'published' %}공개
+    {% elif cfg.status == 'draft' %}초안
+    {% else %}비공개{% endif %}
+  </span>
+</h1>
+<p class="subtitle">
+  <span class="mono">{{ cfg.id }}</span> ·
+  {{ kind.label }} ·
+  활성 컬렉션 <span class="mono">{{ cfg.active_collection }}</span> ·
+  색인된 청크 {{ chunks }}개
+</p>
+
+{% if cfg.needs_rebuild %}
+  <div class="flash warning">
+    색인에 영향을 주는 설정이 바뀌었습니다. 전체 재색인을 실행해야 검색 결과가 새 설정을 반영합니다.
+  </div>
+{% endif %}
+
+<div class="card">
+  <div class="actions">
+    <a class="btn" href="/admin/corpora/{{ cfg.id }}/console">검색 테스트</a>
+    <a class="btn" href="/admin/corpora/{{ cfg.id }}/settings">설정</a>
+
+    <form method="post" action="/admin/corpora/{{ cfg.id }}/reindex" style="margin:0">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="incremental">
+      <button type="submit" {% if active_job %}disabled{% endif %}>변경분 색인</button>
+    </form>
+
+    <form method="post" action="/admin/corpora/{{ cfg.id }}/reindex" style="margin:0"
+          onsubmit="return confirm('전체 재색인을 시작합니다. 완료될 때까지 검색은 기존 색인으로 정상 동작합니다. 계속할까요?')">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="rebuild">
+      <button type="submit" {% if active_job %}disabled{% endif %}>전체 재색인</button>
+    </form>
+
+    {% if cfg.status == 'published' %}
+      <form method="post" action="/admin/corpora/{{ cfg.id }}/unpublish" style="margin:0">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button type="submit">비공개로 전환</button>
+      </form>
+    {% else %}
+      <form method="post" action="/admin/corpora/{{ cfg.id }}/publish" style="margin:0">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button type="submit" class="primary">공개하기</button>
+      </form>
+    {% endif %}
+  </div>
+
+  {% if active_job %}
+    <div id="job-progress" data-job="{{ active_job.id }}" style="margin-top:16px">
+      <div class="hint" id="job-label">
+        작업 #{{ active_job.id }} 진행 중 — {{ active_job.progress_current }}/{{ active_job.progress_total }}
+      </div>
+      <div class="progress"><div id="job-bar" style="width:{{ active_job.progress_percent }}%"></div></div>
+    </div>
+  {% endif %}
+</div>
+
+<h2>문서 올리기</h2>
+<div class="card">
+  <form method="post" action="/admin/corpora/{{ cfg.id }}/documents" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="files">파일 선택</label>
+      <input id="files" name="files" type="file" multiple
+             accept="{{ kind.file_extensions | join(',') }},.zip">
+      <div class="hint">
+        {{ kind.file_extensions | join(", ") }} 파일을 여러 개 고르거나 zip으로 묶어 올릴 수 있습니다.
+        한 번에 최대 {{ max_upload_mb }}MB. 파일명이 곧 제목이 됩니다.
+      </div>
+    </div>
+    <button type="submit" class="primary">올리기</button>
+  </form>
+</div>
+
+<h2>문서 {{ documents | length }}건</h2>
+<div class="card">
+  <form method="get" action="/admin/corpora/{{ cfg.id }}" style="margin-bottom:14px">
+    <input type="search" name="q" value="{{ query }}" placeholder="파일명으로 검색">
+  </form>
+
+  {% if documents %}
+  <form method="post" action="/admin/corpora/{{ cfg.id }}/documents/delete"
+        onsubmit="return confirm('선택한 문서와 해당 색인을 삭제합니다. 계속할까요?')">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:32px"><input type="checkbox" onclick="
+            this.closest('table').querySelectorAll('input[name=filenames]')
+              .forEach(cb => cb.checked = this.checked)"></th>
+          <th>파일명</th>
+          <th class="num">크기</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for doc in documents %}
+        <tr>
+          <td><input type="checkbox" name="filenames" value="{{ doc.filename }}"></td>
+          <td>{{ doc.filename }}</td>
+          <td class="num muted">{{ doc.size_bytes | humanize_bytes }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div style="margin-top:14px">
+      <button type="submit" class="danger">선택 문서 삭제</button>
+    </div>
+  </form>
+  {% else %}
+    <div class="empty">
+      {% if query %}검색 결과가 없습니다.{% else %}아직 올린 문서가 없습니다.{% endif %}
+    </div>
+  {% endif %}
+</div>
+
+<h2>색인 작업 이력</h2>
+<div class="card">
+  {% if jobs %}
+  <table>
+    <thead><tr><th>#</th><th>종류</th><th>상태</th><th>결과</th><th>실행자</th><th>시각</th></tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td>{{ job.id }}</td>
+        <td>{{ "전체 재색인" if job.kind == "rebuild" else "변경분 색인" }}</td>
+        <td>{{ job.status }}</td>
+        <td class="muted">
+          {% if job.stats %}
+            색인 {{ job.stats.indexed_docs }} · 재사용 {{ job.stats.reused_docs }} ·
+            건너뜀 {{ job.stats.skipped_docs }} · 실패 {{ job.stats.failed_docs }}
+            {% if job.stats.lfs_pointer_docs %}
+              <div class="hint" style="color:var(--danger)">
+                {{ job.stats.lfs_pointer_docs }}개 문서가 Git LFS 포인터라 색인되지
+                않았습니다. 서버에서 <span class="mono">git lfs pull</span> 로 실제
+                본문을 받은 뒤 다시 색인하세요.
+              </div>
+            {% endif %}
+          {% elif job.error %}
+            <span style="color:var(--danger)">{{ job.error }}</span>
+          {% else %}-{% endif %}
+        </td>
+        <td>{{ job.created_by or "-" }}</td>
+        <td class="mono muted">{{ job.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">아직 실행된 색인 작업이 없습니다.</div>
+  {% endif %}
+</div>
+
+{% if user.is_superadmin and not cfg.is_seed %}
+<h2>위험 구역</h2>
+<div class="card danger-zone">
+  {% if cfg.status == 'unpublished' %}
+    <p style="margin-top:0">
+      corpus를 완전히 삭제합니다. 올린 문서 파일과 모든 버전의 벡터 컬렉션이 함께 사라지며
+      되돌릴 수 없습니다.
+    </p>
+    <form method="post" action="/admin/corpora/{{ cfg.id }}/destroy">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <div class="field" style="max-width:320px">
+        <label for="confirm">확인을 위해 <span class="mono">{{ cfg.id }}</span> 를 입력하세요</label>
+        <input id="confirm" name="confirm" type="text" autocomplete="off">
+      </div>
+      <button type="submit" class="danger">완전히 삭제</button>
+    </form>
+  {% else %}
+    <p style="margin:0" class="muted">
+      완전삭제는 비공개 상태에서만 할 수 있습니다. 먼저 비공개로 전환하세요.
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 색인이 도는 동안 진행률만 폴링한다. 끝나면 새로고침해 결과를 보여준다.
+(function () {
+  const box = document.getElementById('job-progress');
+  if (!box) return;
+  const jobId = box.dataset.job;
+  const bar = document.getElementById('job-bar');
+  const label = document.getElementById('job-label');
+
+  const poll = async () => {
+    try {
+      const res = await fetch('/admin/jobs/' + jobId, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) return;
+      const job = await res.json();
+      bar.style.width = job.progress_percent + '%';
+      label.textContent = '작업 #' + job.id + ' ' + job.status +
+        ' — ' + job.progress_current + '/' + job.progress_total;
+      if (!job.is_active) {
+        window.location.reload();
+        return;
+      }
+    } catch (e) { /* 일시적 오류는 다음 주기에 다시 시도한다 */ }
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 1500);
+})();
+</script>
+{% endblock %}

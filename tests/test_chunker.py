@@ -3,8 +3,39 @@ from __future__ import annotations
 
 import pytest
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE, MAX_INPUT_TOKENS, SINGLE_CHUNK_CHAR_HINT
-from ingest.chunker import chunk_document, chunk_text
+from config import MAX_INPUT_TOKENS
+from corpora.models import CorpusConfig
+from ingest.chunker import chunk_document as _chunk_document
+from ingest.chunker import chunk_text as _chunk_text
+
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 150
+SINGLE_CHUNK_CHAR_HINT = 5500
+
+# 청킹은 corpus 설정에서 파라미터를 받는다. 아래 테스트들은 기존 기본값을 쓴다.
+CFG = CorpusConfig(
+    id="test",
+    kind="plain",
+    label="테스트",
+    corpus_id="test",
+    base_collection="test",
+    doc_prefix="문서\n",
+    query_prefix="질의\n",
+    embed_dim=1536,
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+    single_chunk_char_hint=SINGLE_CHUNK_CHAR_HINT,
+    active_collection="test_v1",
+    index_version="test:v1",
+)
+
+
+def chunk_document(text, count_tokens=None):
+    return _chunk_document(text, CFG, count_tokens=count_tokens)
+
+
+def chunk_text(text):
+    return _chunk_text(text, CFG)
 
 
 # ---------------------------------------------------------------------------
@@ -166,3 +197,25 @@ class TestChunkText:
         result = chunk_text(text)
         for chunk in result:
             assert chunk.strip() != "", "빈 청크가 결과에 포함되면 안 됨"
+
+
+# ---------------------------------------------------------------------------
+# corpus별 청킹 파라미터가 실제로 반영되는지
+# ---------------------------------------------------------------------------
+
+class TestPerCorpusChunking:
+    """corpus마다 다른 청킹 설정이 적용되어야 한다."""
+
+    def test_smaller_chunk_size_produces_more_chunks(self):
+        text = "라" * 6000
+        coarse = _chunk_text(text, CFG)
+        fine = _chunk_text(text, CFG.with_updates(chunk_size=300, chunk_overlap=50))
+        assert len(fine) > len(coarse)
+
+    def test_single_chunk_hint_is_per_corpus(self):
+        text = "마" * 2000
+        # 기본 corpus는 단일 청크(2000 < 5500)
+        assert len(_chunk_document(text, CFG)) == 1
+        # 한도를 낮춘 corpus는 분할된다
+        tight = CFG.with_updates(single_chunk_char_hint=500)
+        assert len(_chunk_document(text, tight)) > 1
