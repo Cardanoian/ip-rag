@@ -53,10 +53,14 @@
 - [x] 배포 자동화 (`bin/deploy`) — 빌드·푸시·교체·헬스체크·자동 롤백,
       Caddy 리버스 프록시로 자동 HTTPS와 `/admin` IP 제한. 로컬에서 이미지
       build/run, 교체 중 무중단, 백업·복원까지 검증했다
-- [ ] 실제 서버에서 `bin/deploy setup` 1회전 — 인증서 발급, 허용 IP 밖에서
-      `/admin` 404, 배포 중 502 미발생, 롤백까지 확인
-- [ ] `deploy/config.env` 의 `ADMIN_ALLOW_IPS` 를 실제 접속 IP 로 채우기
-      (비워두면 `/admin` 이 전면 차단된다)
+- [x] 실제 서버(rag.gbeai.net) 첫 배포 완료 — Let's Encrypt 인증서 발급,
+      허용 IP 밖에서 `/admin`·`/ready`·`/docs` 404, 교체 중 80개 요청이
+      전부 200(최대 2.3초 지연, 502 없음)까지 확인했다
+- [x] `ADMIN_ALLOW_IPS` 설정. 접속 IP 가 바뀌면 값을 고치고
+      `bin/deploy proxy reload`
+- [ ] `bin/deploy rollback` 실서버 확인 — 첫 배포라 돌아갈 릴리스가 없다.
+      두 번째 배포 뒤에 한 번 시험한다
+- [ ] 최초 관리자 계정 생성: `bin/deploy admin create-user <아이디>`
 - [ ] Rails timeout, 재시도, circuit breaker와 검색 이력 저장 구현
   - 배포 중 Caddy 가 최대 `LB_TRY_DURATION`(기본 60초) 동안 요청을 붙드므로
     Rails 쪽 호출 타임아웃은 30초 이상이어야 한다
