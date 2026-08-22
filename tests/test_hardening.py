@@ -33,7 +33,7 @@ FAKE_RESULTS = [
 ]
 
 
-def test_v1_response_hides_author_and_source_path(monkeypatch):
+def test_v1_response_hides_author_and_source_path(monkeypatch, seed_corpus):
     import api.main as api_main
 
     monkeypatch.delenv("RAG_API_TOKEN", raising=False)
@@ -60,7 +60,7 @@ def test_v1_response_hides_author_and_source_path(monkeypatch):
     assert "판정하지 않습니다" in body["notice"]
 
 
-def test_service_token_is_required_when_configured(monkeypatch):
+def test_service_token_is_required_when_configured(monkeypatch, seed_corpus):
     import api.main as api_main
 
     monkeypatch.setenv("RAG_API_TOKEN", "test-service-token")
@@ -96,7 +96,7 @@ def test_production_without_service_token_returns_503(monkeypatch):
     assert "구성되지 않았습니다" in response.json()["detail"]
 
 
-def test_provider_error_detail_is_not_exposed(monkeypatch):
+def test_provider_error_detail_is_not_exposed(monkeypatch, seed_corpus):
     import api.main as api_main
 
     monkeypatch.delenv("RAG_API_TOKEN", raising=False)
@@ -113,7 +113,7 @@ def test_provider_error_detail_is_not_exposed(monkeypatch):
     assert "sensitive provider detail" not in response.text
 
 
-def test_ready_checks_key_and_index(monkeypatch):
+def test_ready_checks_key_and_index(monkeypatch, seed_corpus):
     import api.main as api_main
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")

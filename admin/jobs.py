@@ -235,17 +235,19 @@ def _run_job(job_id: int, corpus_id: str, kind: str, actor: str | None) -> None:
         else:
             stats = build_index(cfg, progress=progress)
 
-        _mark_finished(job_id, STATUS_SUCCEEDED, stats=stats)
+        # 감사 기록을 완료 표시보다 먼저 남긴다. 순서가 반대면 잡이 끝난 것으로
+        # 보이는 시점에 기록이 아직 없어, 완료를 지켜보던 쪽이 빈 로그를 읽는다.
         audit.record(
             actor, f"job.{kind}.succeeded", corpus_id, job_id=job_id, **stats
         )
+        _mark_finished(job_id, STATUS_SUCCEEDED, stats=stats)
         logger.info("job %d (%s/%s) 완료: %s", job_id, corpus_id, kind, stats)
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
-        _mark_finished(job_id, STATUS_FAILED, error=message)
         audit.record(
             actor, f"job.{kind}.failed", corpus_id, job_id=job_id, error=message
         )
+        _mark_finished(job_id, STATUS_FAILED, error=message)
         logger.exception("job %d (%s/%s) 실패", job_id, corpus_id, kind)
 
 

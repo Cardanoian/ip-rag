@@ -1,7 +1,8 @@
 """시드 corpus 정의 — 빈 DB에 처음 기동할 때 삽입되는 `inventions` 한 건.
 
-값은 멀티 corpus 이전의 config.py 상수를 그대로 옮긴 것이다. 기존 배포가
-마이그레이션 없이 동일하게 동작하도록 환경변수 오버라이드도 유지한다.
+값은 멀티 corpus 이전의 config.py 상수를 그대로 옮긴 것이라 예전 색인 설정과
+호환된다. 다만 문서는 저장소가 아니라 DATA_DIR 볼륨에서 오므로, 처음에는
+문서도 색인도 없는 상태다. 그래서 초안으로 시작한다.
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import os
 
 import config
 from corpora.kinds import InventionKind
-from corpora.models import STATUS_PUBLISHED, CorpusConfig
+from corpora.models import STATUS_DRAFT, CorpusConfig
 
 SEED_CORPUS_ID = "inventions"
 
@@ -26,7 +27,12 @@ QUERY_PREFIX = (
 
 
 def seed_config(now: str) -> CorpusConfig:
-    """시드 corpus 설정. 이미 색인이 있는 배포를 깨지 않도록 published로 시작한다."""
+    """시드 corpus 설정.
+
+    문서를 올리고 색인한 뒤 관리자가 공개하는 흐름을 따르도록 초안으로 만든다.
+    비어 있는 corpus를 공개 상태로 두면 검색이 빈 결과를 주고 /ready 가 계속
+    503을 반환한다.
+    """
     return CorpusConfig(
         id=SEED_CORPUS_ID,
         kind=InventionKind.name,
@@ -47,7 +53,7 @@ def seed_config(now: str) -> CorpusConfig:
             "INDEX_VERSION",
             f"{_BASE_COLLECTION}:{config.EMBED_MODEL}:{_EMBED_DIM}:v1",
         ),
-        status=STATUS_PUBLISHED,
+        status=STATUS_DRAFT,
         is_seed=True,
         created_at=now,
         created_by=None,
