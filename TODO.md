@@ -58,9 +58,9 @@
       전부 200(최대 2.3초 지연, 502 없음)까지 확인했다
 - [x] `ADMIN_ALLOW_IPS` 설정. 접속 IP 가 바뀌면 값을 고치고
       `bin/deploy proxy reload`
-- [ ] `bin/deploy rollback` 실서버 확인 — 첫 배포라 돌아갈 릴리스가 없다.
-      두 번째 배포 뒤에 한 번 시험한다
-- [ ] 최초 관리자 계정 생성: `bin/deploy admin create-user <아이디>`
+- [x] `bin/deploy rollback` 실서버 확인 — 구버전으로 되돌렸다가 복귀했고,
+      두 번 모두 `/data`(관리자 계정, corpus 정의, 감사 로그)가 그대로였다
+- [x] 최초 관리자 계정 생성
 - [ ] Rails timeout, 재시도, circuit breaker와 검색 이력 저장 구현
   - 배포 중 Caddy 가 최대 `LB_TRY_DURATION`(기본 60초) 동안 요청을 붙드므로
     Rails 쪽 호출 타임아웃은 30초 이상이어야 한다
