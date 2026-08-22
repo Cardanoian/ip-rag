@@ -308,6 +308,29 @@ assert_ssh() {
 	die 3 "접속이 되는 것을 확인한 뒤 다시 실행하세요."
 }
 
+# 배포용 디렉터리를 만든다. /opt 처럼 상위가 root 소유면 sudo 로 만들고
+# 소유권을 SSH 사용자에게 넘겨, 이후 작업은 sudo 없이 돌아가게 한다.
+ensure_remote_dir() {
+	if (( DRY_RUN )); then
+		info "[dry-run] mkdir -p $REMOTE_DIR/{backups,proxy} (필요하면 sudo)"
+		return 0
+	fi
+	if ssh_read "mkdir -p '$REMOTE_DIR/backups' '$REMOTE_DIR/proxy'" 2>/dev/null; then
+		return 0
+	fi
+	info "$REMOTE_DIR 을 만들 권한이 없어 sudo 로 시도합니다"
+	if ssh_read "sudo -n mkdir -p '$REMOTE_DIR/backups' '$REMOTE_DIR/proxy' && sudo -n chown -R \$(id -u):\$(id -g) '$REMOTE_DIR'" 2>/dev/null; then
+		ok "sudo 로 $REMOTE_DIR 을 만들고 소유권을 넘겼습니다"
+		return 0
+	fi
+	err "$REMOTE_DIR 을 만들 수 없습니다."
+	info "서버에서 직접 만들어 주세요:"
+	info "  sudo mkdir -p $REMOTE_DIR && sudo chown \$USER $REMOTE_DIR"
+	info "또는 config.env 의 REMOTE_DIR 을 홈 디렉터리 아래로 바꾸세요:"
+	info "  REMOTE_DIR=/home/ubuntu/ip-rag"
+	die 3 "권한 문제를 해결한 뒤 다시 실행하세요."
+}
+
 # 서버에 docker 가 쓸 수 있는 상태인지 확인한다.
 assert_docker() {
 	if ! ssh_read "command -v docker >/dev/null 2>&1"; then
@@ -606,7 +629,8 @@ proxy_apply() {
 		info "[dry-run] 렌더링 결과:"
 		render_caddyfile | sed 's/^/      /' >&2
 	else
-		render_caddyfile | ssh_pipe "umask 022; mkdir -p '$REMOTE_DIR/proxy'; cat > '$REMOTE_DIR/proxy/Caddyfile.new'"
+		ensure_remote_dir
+		render_caddyfile | ssh_pipe "umask 022; cat > '$REMOTE_DIR/proxy/Caddyfile.new'"
 		# 잘못된 설정을 살아 있는 프록시에 밀어넣지 않는다
 		if ! ssh_read "docker run --rm -v '$REMOTE_DIR/proxy':/tmp/caddy:ro '$PROXY_IMAGE' caddy validate --config /tmp/caddy/Caddyfile.new --adapter caddyfile" >/dev/null 2>&1; then
 			ssh_do "rm -f '$REMOTE_DIR/proxy/Caddyfile.new'"
@@ -780,7 +804,7 @@ cmd_setup() {
 	fi
 
 	step "디렉터리·네트워크·볼륨을 만듭니다"
-	ssh_do "mkdir -p '$REMOTE_DIR/backups' '$REMOTE_DIR/proxy'"
+	ensure_remote_dir
 	ssh_do "docker network create '$NETWORK' >/dev/null 2>&1 || true"
 	ssh_do "docker volume create '$DATA_VOLUME' >/dev/null"
 	ssh_do "docker volume create '$CADDY_DATA_VOLUME' >/dev/null"
@@ -805,7 +829,8 @@ cmd_secrets_push_only() {
 		return 0
 	fi
 	# 임시 파일에 쓴 뒤 mv 로 바꾼다. 반쯤 쓰인 env 로 컨테이너가 뜨지 않게 한다.
-	ssh_pipe "umask 077; mkdir -p '$REMOTE_DIR'; cat > '$REMOTE_DIR/env.tmp' && chmod 600 '$REMOTE_DIR/env.tmp' && mv '$REMOTE_DIR/env.tmp' '$REMOTE_DIR/env'" < "$SECRETS_FILE"
+	ensure_remote_dir
+	ssh_pipe "umask 077; cat > '$REMOTE_DIR/env.tmp' && chmod 600 '$REMOTE_DIR/env.tmp' && mv '$REMOTE_DIR/env.tmp' '$REMOTE_DIR/env'" < "$SECRETS_FILE"
 	ok "전송 완료 (0600)"
 }
 
