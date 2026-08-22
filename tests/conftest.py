@@ -55,15 +55,23 @@ def isolated_data_dir(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def seed_corpus() -> CorpusConfig:
-    """시드 발명 corpus (kind=invention)."""
+    """시드 발명 corpus (kind=invention).
+
+    시드는 문서가 없는 상태로 만들어지므로 초안이다. 검색 경로를 다루는
+    테스트가 대부분이라 여기서 공개 상태로 올려둔다. 색인이 비어 있어도
+    되도록 set_status 의 검증을 거치지 않고 직접 갱신한다.
+    부트스트랩 직후의 상태 자체를 확인하려면 corpora.ensure_seed() 를 직접 부른다.
+    """
     corpora.ensure_seed()
-    return corpora.get(corpora.SEED_CORPUS_ID)
+    cfg = corpora.get(corpora.SEED_CORPUS_ID)
+    if cfg.status != corpora.STATUS_PUBLISHED:
+        cfg = corpora.update(cfg, status=corpora.STATUS_PUBLISHED)
+    return cfg
 
 
 @pytest.fixture()
-def plain_corpus() -> CorpusConfig:
-    """관리자가 만들 법한 일반 텍스트 corpus."""
-    corpora.ensure_seed()
+def plain_corpus(seed_corpus) -> CorpusConfig:
+    """관리자가 만들 법한 일반 텍스트 corpus (초안 상태)."""
     return corpora.create(
         corpus_slug="rules",
         label="학교 규정",

@@ -24,8 +24,8 @@ def test_seed_is_created_on_empty_db():
     assert seed.id == corpora.SEED_CORPUS_ID
     assert seed.kind == "invention"
     assert seed.is_seed is True
-    # 기존 배포가 그대로 검색되도록 공개 상태로 시작한다.
-    assert seed.status == corpora.STATUS_PUBLISHED
+    # 문서도 색인도 없는 상태이므로 초안으로 시작한다.
+    assert seed.status == corpora.STATUS_DRAFT
 
 
 def test_ensure_seed_is_idempotent():
