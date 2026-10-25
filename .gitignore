@@ -1,6 +1,7 @@
 # 영속 데이터 볼륨 (벡터, 업로드 문서, 운영 DB)
 data/
 chroma_db/
+rag_문서/
 
 # bin/deploy backup pull 로 내려받은 사본
 backups/

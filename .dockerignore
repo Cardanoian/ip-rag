@@ -9,6 +9,7 @@ __pycache__
 .mypy_cache
 docs
 chroma_db
+rag_문서
 tests
 .omc
 

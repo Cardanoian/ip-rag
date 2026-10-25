@@ -4,17 +4,26 @@
 
 ## 첫 설정
 
-아래 명령은 **배포한 RAG 서버의 프로젝트 폴더**에서 실행합니다. 실제 비밀값을 인자나 문서에 적지 않습니다.
+현재 운영 배포는 Docker를 사용합니다. 서버의 `/opt/ip-rag`에는 배포 설정과 이력이 있고, Python 코드와 실행 환경은 `ip-rag-web` 컨테이너의 `/app`에 있습니다. 영속 DB와 문서는 컨테이너의 `/data` 볼륨을 사용합니다.
+
+아래 명령은 **로컬 개발 머신의 이 저장소 루트**에서 실행합니다. `bin/deploy exec`가 SSH를 거쳐 운영 컨테이너 안에서 명령을 실행합니다. 먼저 변경된 코드를 커밋하고 배포하세요. 구버전 이미지에는 `scripts.services`가 없어 `No module named scripts.services` 오류가 납니다.
 
 ```bash
-python -m scripts.services bootstrap-easyflow
-python -m scripts.services grant --service coai --token-id coai-read-v1 --corpus inventions --read
-python -m scripts.services grant --service easyflow --token-id easyflow-read-v1 --corpus easyflow --read
-python -m scripts.services grant --service easyflow --token-id easyflow-write-v1 --corpus easyflow --write
-python -m scripts.services list
+bin/deploy
+bin/deploy exec python -m scripts.services bootstrap-easyflow
+bin/deploy exec python -m scripts.services grant --service coai --token-id coai-read-v1 --corpus inventions --read
+bin/deploy exec python -m scripts.services grant --service easyflow --token-id easyflow-read-v1 --corpus easyflow --read
+bin/deploy exec python -m scripts.services grant --service easyflow --token-id easyflow-write-v1 --corpus easyflow --write
+bin/deploy exec python -m scripts.services list
+
+# 별도 CLI 프로세스에서 생성한 자료집을 웹 프로세스의 캐시에도 반영합니다.
+bin/deploy redeploy
+bin/deploy status
 ```
 
-`grant`는 토큰을 숨김 입력으로 받습니다. 32자 이상의 충분히 긴 무작위 값을 사용하고, 같은 값을 각 Rails 앱의 암호화 credentials에 입력합니다. 이 서버는 검증용 SHA-256 해시만 저장합니다. 자동 전달에는 `--token-stdin`을 사용할 수 있습니다. 토큰 원문이 출력되는 명령이나 로그를 남기지 마세요.
+SSH로 서버에 직접 접속한 상태라면 `docker exec -it ip-rag-web bash`로 컨테이너에 들어간 뒤 `/app`에서 `python -m scripts.services ...`를 실행할 수도 있습니다. 로컬에서 `python -m scripts.services ...`만 실행하면 로컬 데이터에 적용되므로 운영 설정에는 위의 `bin/deploy exec` 명령을 사용하세요.
+
+`grant`는 토큰을 숨김 입력으로 받습니다. 서비스와 읽기·쓰기 용도마다 서로 다른 32자 이상의 충분히 긴 무작위 값을 사용하고, 등록한 값을 해당 Rails 앱의 암호화 credentials에 입력합니다. 이 서버는 검증용 SHA-256 해시만 저장합니다. 자동 전달에는 `--token-stdin`을 사용할 수 있습니다. 토큰 원문이 출력되는 명령이나 로그를 남기지 마세요. 같은 `--token-id`로 다시 등록하면 기존 키와 권한이 교체되므로, 이미 설정했다면 `list`로 확인한 뒤 필요한 항목만 변경하세요.
 
 | 앱 | credentials | 입력 값 |
 | --- | --- | --- |
