@@ -114,9 +114,38 @@ class PlainKind(CorpusKind):
         return f"제목: {title}\n{chunk}"
 
 
+class EasyflowKind(PlainKind):
+    """승인 문서용: 출처·버전·페이지를 보존한다. 기존 corpus에는 UUID를 강제하지 않는다."""
+    name = "easyflow"
+    label = "EasyFlow 승인 자료"
+    description = "EasyFlow 서비스 API로 승인된 페이지별 텍스트를 색인합니다."
+    creatable_by_admin = True
+    metadata_fields = ("title", "source_id", "source_version_id", "operation_id")
+    public_fields = ("title", "source_id", "source_version_id", "page", "anchor")
+
+    def load(self, path: Path, corpus_id: str) -> dict | None:
+        import json
+        import uuid
+        source = super().load(path, corpus_id)
+        if source is None:
+            return None
+        source["source_id"] = str(uuid.UUID(path.stem))
+        sidecar = path.with_suffix(".json")
+        if sidecar.exists():
+            values = json.loads(sidecar.read_text(encoding="utf-8"))
+            for key in ("title", "source_version_id", "operation_id", "pages"):
+                if key in values:
+                    source[key] = values[key]
+        else:
+            source["source_version_id"] = ""
+            source["operation_id"] = ""
+        return source
+
+
 _KINDS: dict[str, CorpusKind] = {
     InventionKind.name: InventionKind(),
     PlainKind.name: PlainKind(),
+    EasyflowKind.name: EasyflowKind(),
 }
 
 DEFAULT_KIND = PlainKind.name

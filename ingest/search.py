@@ -43,8 +43,14 @@ def search(
         similarity 내림차순 문서 dict 리스트. metadata는 kind의 public_fields만 담는다.
     """
     kind = kind_of(cfg)
-    qvec = embed_query(query, cfg)
     where = kind.build_where(cfg, options or {})
+    if cfg.kind == "easyflow":
+        from api.sources import active_jobs
+        active = active_jobs(cfg.id)
+        if not active:
+            return []
+        where = {"operation_id": {"$in": active}}
+    qvec = embed_query(query, cfg)
 
     col = get_collection(cfg.active_collection)
     raw = col.query(
@@ -63,8 +69,11 @@ def search(
     def _to_sim(distance: float) -> float:
         return max(0.0, min(1.0, 1.0 - distance / 2.0))
 
+    permitted_operations = set(active_jobs(cfg.id)) if cfg.kind == "easyflow" else None
     groups: dict[str, list[tuple[float, str, dict]]] = {}
     for distance, metadata, document in zip(distances, metadatas, documents):
+        if permitted_operations is not None and metadata.get("operation_id") not in permitted_operations:
+            continue
         source_path = metadata["source_path"]
         groups.setdefault(source_path, []).append(
             (_to_sim(distance), document, metadata)

@@ -233,9 +233,9 @@ def test_get_unknown_kind_raises():
         get_kind("nonexistent")
 
 
-def test_only_plain_is_creatable():
+def test_plain_and_easyflow_are_creatable():
     names = {kind.name for kind in corpora.creatable_kinds()}
-    assert names == {"plain"}
+    assert names == {"plain", "easyflow"}
 
 
 # ---------------------------------------------------------------------------

@@ -35,7 +35,6 @@ def _unavailable(exc: Exception) -> EmbeddingUnavailable:
         "임베딩 공급자 호출 실패 (%s%s)",
         type(exc).__name__,
         f", code={code}" if code else "",
-        exc_info=True,
     )
     return EmbeddingUnavailable(
         f"임베딩 서비스를 사용할 수 없습니다 ({type(exc).__name__})"

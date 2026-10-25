@@ -65,8 +65,19 @@
 
 <h2>문서 올리기</h2>
 <div class="card">
+  {% if cfg.kind == 'easyflow' %}
+  <p>EasyFlow 승인 자료는 EasyFlow 관리자 화면에서만 등록·중지·삭제합니다.</p>
+  {% else %}
   <form method="post" action="/admin/corpora/{{ cfg.id }}/documents" enctype="multipart/form-data">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="target_corpus">업로드·색인 대상 corpus</label>
+      <select id="target_corpus" name="target_corpus" required>
+        {% for target in upload_corpora %}
+        <option value="{{ target.id }}" {% if target.id == cfg.id %}selected{% endif %}>{{ target.label }} ({{ target.id }})</option>
+        {% endfor %}
+      </select>
+    </div>
     <div class="field">
       <label for="files">파일 선택</label>
       <input id="files" name="files" type="file" multiple
@@ -76,8 +87,10 @@
         한 번에 최대 {{ max_upload_mb }}MB. 파일명이 곧 제목이 됩니다.
       </div>
     </div>
-    <button type="submit" class="primary">올리기</button>
+    <label><input type="checkbox" name="index_after_upload" value="true" checked> 업로드 후 선택한 corpus의 변경분 색인</label>
+    <button type="submit" class="primary">선택한 corpus에 올리기</button>
   </form>
+  {% endif %}
 </div>
 
 <h2>

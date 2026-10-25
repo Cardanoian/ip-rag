@@ -5,9 +5,17 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
+import time
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from api.services import Principal, check_rate, failure, configured
+from api.sources import router as source_router, worker as source_worker
 from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -68,14 +76,20 @@ async def lifespan(app: FastAPI):
             "GEMINI_API_KEY 가 설정되지 않았습니다. "
             "검색 호출 시 503 오류가 발생합니다."
         )
-    if config.is_production() and not os.getenv("RAG_API_TOKEN"):
-        logger.error("production 환경에 RAG_API_TOKEN이 설정되지 않았습니다.")
+    if config.is_production() and not configured():
+        logger.error("production 환경에 서비스 인증이 설정되지 않았습니다.")
     if config.session_secret_is_ephemeral:
         logger.error(
             "SESSION_SECRET이 설정되지 않아 임시 키로 기동했습니다. "
             "서버를 재시작할 때마다 어드민 로그인이 풀립니다."
         )
-    yield
+    stop = asyncio.Event()
+    service_worker = asyncio.create_task(source_worker(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        await service_worker
 
 
 app = FastAPI(
@@ -99,6 +113,51 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
+app.include_router(source_router)
+
+
+@app.middleware("http")
+async def request_trace(request: Request, call_next):
+    request.state.request_id = uuid.uuid4().hex
+    started = time.monotonic()
+    if "/sources/" in request.url.path and request.method in {"PUT", "PATCH", "DELETE"}:
+        chunks = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > 6 * 1024 * 1024:
+                return JSONResponse({"detail": "요청 크기 제한을 초과했습니다", "error": {"code": "request_too_large"}}, status_code=413)
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    if request.url.path.startswith("/v1/"):
+        corpus_name = request.path_params.get("corpus_id", request.path_params.get("corpus", "-"))
+        if corpus_name != "-" and not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,30}", corpus_name):
+            corpus_name = "invalid"
+        logger.info("rag_request request_id=%s service=%s corpus=%s status=%s duration_ms=%d",
+                    request.state.request_id, getattr(request.state, "service_id", "unknown"),
+                    corpus_name, response.status_code, int((time.monotonic() - started) * 1000))
+    return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def api_error(request: Request, exc):
+    if not request.url.path.startswith(("/v1/", "/search")):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+    detail = exc.detail if isinstance(exc.detail, dict) else {"message": exc.detail}
+    defaults = {401: "invalid_service_token", 403: "operation_not_allowed", 404: "corpus_not_available", 422: "invalid_request"}
+    return JSONResponse({"detail": detail.get("message", "요청을 처리하지 못했습니다"),
+                         "error": {"code": detail.get("code", defaults.get(exc.status_code, "request_failed"))},
+                         "request_id": getattr(request.state, "request_id", "")},
+                        status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_input(request: Request, exc):
+    return JSONResponse({"detail": "입력이 API 계약에 맞지 않습니다", "error": {"code": "invalid_request"},
+                         "request_id": getattr(request.state, "request_id", "")}, status_code=422)
+
 
 
 @app.exception_handler(NotAuthenticated)
@@ -120,7 +179,8 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-def _resolve_published(corpus_id: str):
+def _resolve_published(corpus_id: str, principal: Principal):
+    principal.authorize(corpus_id)
     """공개된 corpus만 검색 대상이다. 비공개·초안은 존재하지 않는 것으로 취급한다."""
     try:
         return corpora.get_published(corpus_id)
@@ -133,63 +193,54 @@ def _resolve_published(corpus_id: str):
 
 @app.get("/ready", response_model=ReadyResponse)
 async def ready(response: Response) -> ReadyResponse:
-    """임베딩 키와 검색 색인이 실제 요청을 받을 준비가 됐는지 확인한다.
-
-    공개된 corpus만 검사한다. 아직 색인 전인 초안 corpus는 헬스체크를 깨뜨리지 않는다.
-    """
-    problems: list[str] = []
+    """공통 엔진 의존성만 확인한다. 자료집 정보는 인증된 개별 점검에서 제공한다."""
+    import storage
+    problems = []
     if not os.getenv("GEMINI_API_KEY"):
         problems.append("GEMINI_API_KEY is missing")
-    if config.is_production() and not os.getenv("RAG_API_TOKEN"):
-        problems.append("RAG_API_TOKEN is missing")
     if config.session_secret_is_ephemeral:
         problems.append("SESSION_SECRET is missing")
-
-    published = corpora.list_published()
-    if not published:
-        problems.append("no published corpus")
-
-    readiness: list[CorpusReadiness] = []
-    total_chunks = 0
-    for cfg in published:
-        corpus_problems: list[str] = []
-        indexed = 0
-        try:
-            indexed = await asyncio.to_thread(count_documents, cfg.active_collection)
-            if indexed == 0:
-                corpus_problems.append("search index is empty")
-        except Exception:
-            logger.exception("준비 상태 확인 중 ChromaDB 접근 실패: %s", cfg.id)
-            corpus_problems.append("search index is unavailable")
-
-        total_chunks += indexed
-        problems.extend(f"{cfg.id}: {problem}" for problem in corpus_problems)
-        readiness.append(
-            CorpusReadiness(
-                corpus=cfg.id,
-                corpus_id=cfg.corpus_id,
-                index_version=cfg.index_version,
-                indexed_chunks=indexed,
-                problems=corpus_problems,
-            )
-        )
-
+    with storage.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM service_tokens WHERE active=1")
+        has_tokens = cur.fetchone()["n"] > 0
+    if config.is_production() and not os.getenv("RAG_API_TOKEN") and not has_tokens:
+        problems.append("service authentication is missing")
+    try:
+        from ingest.store import get_client
+        await asyncio.to_thread(get_client)
+    except Exception:
+        problems.append("search store is unavailable")
     if problems:
         response.status_code = 503
+    return ReadyResponse(status="not_ready" if problems else "ready", indexed_chunks=0,
+                         corpus_id="", index_version="", problems=problems, corpora=[])
 
-    # 최상위 corpus_id/index_version은 기존 연동 호환을 위해 시드 corpus 값을 쓴다.
-    seed = next(
-        (cfg for cfg in published if cfg.id == corpora.SEED_CORPUS_ID),
-        published[0] if published else None,
-    )
-    return ReadyResponse(
-        status="ready" if not problems else "not_ready",
-        indexed_chunks=total_chunks,
-        corpus_id=seed.corpus_id if seed else "",
-        index_version=seed.index_version if seed else "",
-        problems=problems,
-        corpora=readiness,
-    )
+
+@app.get("/v1/corpora/{corpus_id}/ready")
+async def corpus_ready(corpus_id: str, response: Response, principal: Principal = Depends(require_service_token)):
+    cfg = _resolve_published(corpus_id, principal)
+    count = await asyncio.to_thread(count_documents, cfg.active_collection)
+    if not os.getenv("GEMINI_API_KEY") or count == 0:
+        response.status_code = 503
+    return {"status": "ready" if response.status_code != 503 else "not_ready",
+            "corpus": cfg.id, "indexed_chunks": count, "index_version": cfg.index_version}
+
+
+_SERVICE_SEMAPHORES = {}
+
+
+async def _service_search(principal, cfg, req):
+    key = (asyncio.get_running_loop(), principal.service_id)
+    limit = max(1, int(os.getenv("SEARCH_SERVICE_CONCURRENCY", "5")))
+    semaphore = _SERVICE_SEMAPHORES.setdefault(key, asyncio.Semaphore(limit))
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=config.SEARCH_QUEUE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise failure(429, "rate_limited", "서비스 검색 대기 한도를 초과했습니다", {"Retry-After": "1"})
+    try:
+        return await _search_with_backpressure(cfg, req)
+    finally:
+        semaphore.release()
 
 
 async def _search_with_backpressure(cfg, req: SearchRequest) -> list[dict]:
@@ -200,10 +251,7 @@ async def _search_with_backpressure(cfg, req: SearchRequest) -> list[dict]:
             timeout=config.SEARCH_QUEUE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=503,
-            detail="서버가 바쁩니다. 잠시 후 다시 시도하세요.",
-        )
+        raise failure(503, "search_busy", "서버가 바쁩니다. 잠시 후 다시 시도하세요.")
 
     try:
         try:
@@ -215,13 +263,10 @@ async def _search_with_backpressure(cfg, req: SearchRequest) -> list[dict]:
                 req.search_options(),
             )
         except RuntimeError:
-            logger.exception("임베딩 또는 검색 저장소를 사용할 수 없음")
-            raise HTTPException(
-                status_code=503,
-                detail="검색 서비스를 일시적으로 사용할 수 없습니다.",
-            )
+            logger.error("임베딩 또는 검색 저장소를 사용할 수 없음")
+            raise failure(503, "dependency_unavailable", "검색 서비스를 일시적으로 사용할 수 없습니다.")
         except Exception as exc:
-            logger.exception("검색 중 예기치 않은 오류: %s", type(exc).__name__)
+            logger.error("검색 중 예기치 않은 오류: %s", type(exc).__name__)
             raise HTTPException(
                 status_code=500,
                 detail="검색 중 내부 오류가 발생했습니다.",
@@ -231,10 +276,12 @@ async def _search_with_backpressure(cfg, req: SearchRequest) -> list[dict]:
 
 
 @app.get("/v1/corpora", response_model=CorpusListResponse)
-async def list_corpora() -> CorpusListResponse:
+async def list_corpora(principal: Principal = Depends(require_service_token)) -> CorpusListResponse:
     """검색 가능한 corpus 목록. 초안·비공개 corpus는 나오지 않는다."""
     items: list[CorpusInfo] = []
     for cfg in corpora.list_published():
+        if not principal.allows(cfg.id):
+            continue
         indexed = await asyncio.to_thread(count_documents, cfg.active_collection)
         items.append(
             CorpusInfo(
@@ -254,10 +301,11 @@ async def list_corpora() -> CorpusListResponse:
     response_model=CorpusSearchResponse,
     dependencies=[Depends(require_service_token)],
 )
-async def search_corpus(corpus_id: str, req: SearchRequest) -> CorpusSearchResponse:
+async def search_corpus(corpus_id: str, req: SearchRequest, principal: Principal = Depends(require_service_token)) -> CorpusSearchResponse:
     """corpus 지정 유사 자료 검색."""
-    cfg = _resolve_published(corpus_id)
-    raw_results = await _search_with_backpressure(cfg, req)
+    cfg = _resolve_published(corpus_id, principal)
+    check_rate(principal)
+    raw_results = await _service_search(principal, cfg, req)
     results = [
         CorpusResultItem(
             document_id=item["document_id"],
@@ -275,6 +323,8 @@ async def search_corpus(corpus_id: str, req: SearchRequest) -> CorpusSearchRespo
         count=len(results),
         corpus_id=cfg.corpus_id,
         index_version=cfg.index_version,
+        notice=("검색 결과는 승인된 학교 업무 자료에서 찾은 참고 정보입니다. 원문과 적용 시점을 확인하세요."
+                if cfg.kind == "easyflow" else CorpusSearchResponse.model_fields["notice"].default),
     )
 
 
@@ -284,10 +334,11 @@ async def search_corpus(corpus_id: str, req: SearchRequest) -> CorpusSearchRespo
     deprecated=True,
     dependencies=[Depends(require_service_token)],
 )
-async def search_v1(req: SearchRequest) -> SearchResponseV1:
+async def search_v1(req: SearchRequest, principal: Principal = Depends(require_service_token)) -> SearchResponseV1:
     """하위 호환 API. 신규 연동은 /v1/corpora/{corpus_id}/search 를 사용한다."""
-    cfg = _resolve_published(corpora.SEED_CORPUS_ID)
-    raw_results = await _search_with_backpressure(cfg, req)
+    cfg = _resolve_published(corpora.SEED_CORPUS_ID, principal)
+    check_rate(principal)
+    raw_results = await _service_search(principal, cfg, req)
     results = [
         PublicResultItem(
             document_id=item["document_id"],
@@ -315,10 +366,11 @@ async def search_v1(req: SearchRequest) -> SearchResponseV1:
     deprecated=True,
     dependencies=[Depends(require_service_token)],
 )
-async def search_endpoint(req: SearchRequest) -> SearchResponse:
+async def search_endpoint(req: SearchRequest, principal: Principal = Depends(require_service_token)) -> SearchResponse:
     """하위 호환 API. 내부 경로와 저자명을 포함하므로 신규 연동에 쓰지 않는다."""
-    cfg = _resolve_published(corpora.SEED_CORPUS_ID)
-    raw_results = await _search_with_backpressure(cfg, req)
+    cfg = _resolve_published(corpora.SEED_CORPUS_ID, principal)
+    check_rate(principal)
+    raw_results = await _service_search(principal, cfg, req)
     results = []
     for item in raw_results:
         meta = item.get("_raw_metadata", {})

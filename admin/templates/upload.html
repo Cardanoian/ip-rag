@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}문서 업로드{% endblock %}
+{% block content %}
+<h1>문서 업로드</h1>
+<p class="subtitle">자료집을 먼저 선택하면 파일 저장과 벡터 색인이 모두 그 자료집에 적용됩니다.</p>
+<div class="card">
+  <form method="post" action="/admin/documents/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="target_corpus">업로드·색인 대상 corpus_id</label>
+      <select id="target_corpus" name="target_corpus" required>
+        <option value="">자료집을 선택하세요</option>
+        {% for target in upload_corpora %}
+        <option value="{{ target.id }}">{{ target.label }} ({{ target.id }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="files">문서 파일</label>
+      <input id="files" name="files" type="file" multiple accept=".md,.txt,.zip" required>
+      <p class="hint">선택한 자료집이 허용하는 형식만 등록됩니다. 발명 자료의 기존 파일명 규칙을 유지하세요.</p>
+    </div>
+    <p><label><input type="checkbox" name="index_after_upload" value="true" checked> 업로드 후 변경분 색인</label></p>
+    <button class="primary" type="submit">선택한 corpus에 업로드</button>
+  </form>
+</div>
+<p class="muted">EasyFlow 자료는 EasyFlow 관리자 화면에서만 등록합니다. 이 화면의 직접 업로드 대상에는 표시하지 않습니다.</p>
+{% endblock %}

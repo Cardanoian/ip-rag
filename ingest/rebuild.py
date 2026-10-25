@@ -46,7 +46,7 @@ def prune_old_collections(cfg, keep: Optional[int] = None) -> list[str]:
     return dropped
 
 
-def rebuild_corpus(
+def _rebuild_corpus(
     cfg,
     progress: Optional[Callable[[int, int], None]] = None,
     limit: Optional[int] = None,
@@ -90,3 +90,11 @@ def rebuild_corpus(
         cfg.id, next_name, stats["total_chunks"],
     )
     return updated, stats
+
+
+def rebuild_corpus(cfg, progress=None, limit=None):
+    if cfg.kind == "easyflow":
+        from api.sources import corpus_lock
+        with corpus_lock(cfg.id):
+            return _rebuild_corpus(corpora.get(cfg.id), progress=progress, limit=limit)
+    return _rebuild_corpus(cfg, progress=progress, limit=limit)

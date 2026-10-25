@@ -125,7 +125,8 @@ def test_ready_checks_key_and_index(monkeypatch, seed_corpus):
 
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
-    assert response.json()["indexed_chunks"] == 42
+    assert response.json()["indexed_chunks"] == 0
+    assert response.json()["corpora"] == []
 
 
 def test_retry_backoff_only_retries_transient_errors(monkeypatch):

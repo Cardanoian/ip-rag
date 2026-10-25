@@ -11,6 +11,10 @@
 이 문서는 설치·배포·API 연동을 다룹니다.
 **관리 화면 사용법은 [ADMIN_MANUAL.md](ADMIN_MANUAL.md)를 보세요.**
 
+## 공동 서비스 운영
+
+Co-AI와 EasyFlow의 서비스별 토큰·자료집·색인 API·이전 절차는 [SHARED_SERVICE.md](SHARED_SERVICE.md)를 따르세요. EasyFlow credentials의 `rag.corpus_id`는 `easyflow`입니다. 기존 단일 토큰 설명은 이전 경로의 설명입니다.
+
 ## 현재 범위
 
 - 기본 corpus: 발명대회 수상작 1979~2017년, 약 12,630개 Markdown 문서

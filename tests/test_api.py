@@ -232,13 +232,13 @@ def test_health(client):
     assert resp.json() == {"status": "ok"}
 
 
-def test_ready_reports_per_corpus(client):
+def test_ready_does_not_expose_corpus_details(client):
     resp = client.get("/ready")
     body = resp.json()
 
     assert "corpora" in body
     names = {item["corpus"] for item in body["corpora"]}
-    assert names == {"inventions"}
+    assert names == set()
 
 
 def test_ready_ignores_draft_corpus(client, plain_corpus):

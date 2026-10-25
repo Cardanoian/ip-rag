@@ -103,7 +103,9 @@ def connect() -> sqlite3.Connection:
 
     key = str(path.resolve())
     if key not in _initialized_paths:
-        conn.executescript(SCHEMA)
+        from api.services import SCHEMA as SERVICE_SCHEMA
+        from api.sources import SCHEMA as SOURCE_SCHEMA
+        conn.executescript(SCHEMA + SERVICE_SCHEMA + SOURCE_SCHEMA)
         conn.commit()
         _initialized_paths.add(key)
     return conn
@@ -127,6 +129,7 @@ def transaction() -> Iterator[sqlite3.Cursor]:
     """
     conn = connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         yield cur
         conn.commit()

@@ -232,6 +232,7 @@ async def corpus_detail(
         "corpus_detail.html",
         {
             "cfg": cfg,
+            "upload_corpora": [item for item in corpora.list_all() if item.kind != "easyflow"],
             "kind": corpora.kind_of(cfg),
             "documents": document_list,
             "document_count": len(all_documents),
@@ -448,9 +449,15 @@ async def upload_documents(
     user: AdminUser = Depends(require_admin),
     csrf: str = Form(""),
     files: list[UploadFile] = None,
+    target_corpus: str = Form(""),
+    index_after_upload: bool = Form(False),
 ):
     verify_csrf(request, csrf)
+    corpus_id = target_corpus or corpus_id
     cfg = _get_corpus(corpus_id)
+    if cfg.kind == "easyflow":
+        flash(request, "EasyFlow 승인 자료는 EasyFlow에서 등록·중지·삭제하세요.", "error")
+        return _redirect(f"/admin/corpora/{corpus_id}")
 
     payload: list[tuple[str, bytes]] = []
     for upload in files or []:
@@ -465,7 +472,15 @@ async def upload_documents(
     try:
         # zip 해제와 수천 개 파일 쓰기는 통째로 블로킹이다. 단일 워커라
         # 이벤트 루프에서 그대로 돌리면 그동안 검색도 /health 도 멈춘다.
-        result = await asyncio.to_thread(documents.save_uploads, cfg, payload)
+        def save_and_index():
+            from api.sources import corpus_lock
+            with corpus_lock(cfg.id):
+                if jobs.active_job_for(cfg.id) is not None:
+                    raise documents.UploadError("선택한 자료집의 색인이 끝난 뒤 업로드하세요.")
+                result = documents.save_uploads(cfg, payload)
+                job = jobs.enqueue(cfg.id, jobs.KIND_INCREMENTAL, user.username) if index_after_upload and result.saved else None
+                return result, job
+        result, index_job = await asyncio.to_thread(save_and_index)
     except documents.UploadError as exc:
         flash(request, str(exc), "error")
         return _redirect(f"/admin/corpora/{corpus_id}")
@@ -479,7 +494,9 @@ async def upload_documents(
     )
 
     if result.saved:
-        flash(request, f"{result.saved_count}개 파일을 올렸습니다.", "success")
+        flash(request, f"{cfg.label} ({cfg.id})에 {result.saved_count}개 파일을 올렸습니다.", "success")
+        if index_job:
+            flash(request, f"대상 corpus={cfg.id}의 변경분 색인 작업 #{index_job.id}을 시작했습니다.", "success")
     for name, reason in result.rejected[:10]:
         flash(request, f"거부됨 — {name}: {reason}", "error")
     if len(result.rejected) > 10:
@@ -498,6 +515,9 @@ async def repair_document_filenames(
     """예전 ZIP 업로드에서 CP437로 잘못 저장된 UTF-8/CP949 이름을 복구한다."""
     verify_csrf(request, csrf)
     cfg = _get_corpus(corpus_id)
+    if cfg.kind == "easyflow":
+        flash(request, "EasyFlow 승인 자료는 EasyFlow에서 등록·중지·삭제하세요.", "error")
+        return _redirect(f"/admin/corpora/{corpus_id}")
     active = jobs.active_job_for(cfg.id)
     if active is not None:
         flash(
@@ -548,6 +568,9 @@ async def delete_all_documents_route(
     """개별 체크박스나 폼 필드 개수 제한 없이 corpus 문서 전체를 삭제한다."""
     verify_csrf(request, csrf)
     cfg = _get_corpus(corpus_id)
+    if cfg.kind == "easyflow":
+        flash(request, "EasyFlow 승인 자료는 EasyFlow에서 등록·중지·삭제하세요.", "error")
+        return _redirect(f"/admin/corpora/{corpus_id}")
 
     if confirm.strip() != cfg.id:
         flash(request, "전체 삭제 확인을 위해 corpus 주소를 정확히 입력하세요.", "error")
@@ -592,6 +615,9 @@ async def delete_documents_route(
 ):
     verify_csrf(request, csrf)
     cfg = _get_corpus(corpus_id)
+    if cfg.kind == "easyflow":
+        flash(request, "EasyFlow 승인 자료는 EasyFlow에서 등록·중지·삭제하세요.", "error")
+        return _redirect(f"/admin/corpora/{corpus_id}")
 
     if not filenames:
         flash(request, "삭제할 문서를 선택하세요.", "error")
@@ -960,3 +986,16 @@ async def audit_page(
     user: AdminUser = Depends(require_superadmin),
 ) -> HTMLResponse:
     return render(request, "audit.html", {"entries": audit.recent(300)})
+
+
+@router.get("/upload", response_class=HTMLResponse)
+async def upload_form(request: Request, user: AdminUser = Depends(require_admin)):
+    return render(request, "upload.html", {"upload_corpora": [cfg for cfg in corpora.list_all() if cfg.kind != "easyflow"]})
+
+
+@router.post("/documents/upload")
+async def upload_to_corpus(request: Request, target_corpus: str = Form(...),
+                           files: list[UploadFile] = None, csrf: str = Form(""),
+                           index_after_upload: bool = Form(False), user: AdminUser = Depends(require_admin)):
+    return await upload_documents(corpus_id=target_corpus, request=request, user=user, csrf=csrf,
+                                  files=files, target_corpus=target_corpus, index_after_upload=index_after_upload)

@@ -72,6 +72,9 @@ def build_index(
           reused_docs    - content_hash 동일 → 재사용(재임베딩 생략) 문서 수
           lfs_pointer_docs - `git lfs pull` 이 안 돼 본문 대신 포인터가 든 문서 수
     """
+    if cfg.kind == "easyflow":
+        from api.sources import rebuild_managed
+        return rebuild_managed(cfg, target_collection=target_collection, progress=progress, reset=reset, limit=limit)
     kind = kind_of(cfg)
     collection_name = target_collection or cfg.active_collection
     collection = get_collection(collection_name, reset=reset)
